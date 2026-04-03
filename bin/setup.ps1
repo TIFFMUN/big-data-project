@@ -26,6 +26,39 @@ function Ok($msg)    { Write-Host "[OK]    $msg" -ForegroundColor Green }
 function Warn($msg)  { Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
 function Err($msg)   { Write-Host "[ERROR] $msg" -ForegroundColor Red }
 
+function Test-S3BucketExists($bucketName) {
+    $awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+    if (-not $awsCmd) {
+        throw "AWS CLI not found in PATH."
+    }
+
+    $stdoutFile = [System.IO.Path]::GetTempFileName()
+    $stderrFile = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $proc = Start-Process -FilePath $awsCmd.Source `
+            -ArgumentList @("s3api", "head-bucket", "--bucket", $bucketName) `
+            -NoNewWindow -PassThru -Wait `
+            -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile
+
+        $stderr = (Get-Content $stderrFile -Raw -ErrorAction SilentlyContinue)
+
+        if ($proc.ExitCode -eq 0) {
+            return @{ Exists = $true; Forbidden = $false; ErrorMessage = "" }
+        }
+
+        if ($stderr -match "Forbidden" -or $stderr -match "\b403\b") {
+            return @{ Exists = $false; Forbidden = $true; ErrorMessage = $stderr.Trim() }
+        }
+
+        return @{ Exists = $false; Forbidden = $false; ErrorMessage = $stderr.Trim() }
+    }
+    finally {
+        Remove-Item $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host ""
 Write-Host "============================================="
 Write-Host "  Big Data Project - Setup"
@@ -48,8 +81,14 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
-# Check Docker is running
-try { docker info 2>$null | Out-Null } catch {
+# Check Docker is running.
+# `docker info` can emit warnings on stderr in some environments (e.g., WSL2),
+# which PowerShell may treat as terminating errors with $ErrorActionPreference=Stop.
+# Using --format avoids that noisy output while still proving the daemon is reachable.
+try {
+    $dockerServerVersion = docker info --format "{{.ServerVersion}}" 2>$null
+    if (-not $dockerServerVersion) { throw "Docker daemon did not return a version." }
+} catch {
     Err "Docker is not running. Start Docker Desktop first."
     exit 1
 }
@@ -177,8 +216,13 @@ if ($LASTEXITCODE -ne 0) { Err "terraform init failed"; exit 1 }
 
 # If the S3 bucket already exists (e.g. preserved from a previous teardown),
 # import it into Terraform state so it won't try to recreate it.
-aws s3api head-bucket --bucket $bucketName 2>$null
-if ($LASTEXITCODE -eq 0) {
+$bucketCheck = Test-S3BucketExists -bucketName $bucketName
+if ($bucketCheck.Forbidden) {
+    Err "S3 bucket '$bucketName' already exists but is not accessible to this account. Choose a different bucket name."
+    exit 1
+}
+
+if ($bucketCheck.Exists) {
     Info "S3 bucket '$bucketName' already exists - importing into Terraform state..."
     terraform import -var-file="terraform.tfvars" module.s3.aws_s3_bucket.data_lake $bucketName 2>$null
     terraform import -var-file="terraform.tfvars" module.s3.aws_s3_bucket_versioning.data_lake $bucketName 2>$null
