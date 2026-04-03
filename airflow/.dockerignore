@@ -1,0 +1,7 @@
+# Airflow Docker ignores
+.env
+logs/
+plugins/
+__pycache__/
+*.pyc
+
