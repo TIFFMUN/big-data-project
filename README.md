@@ -112,80 +112,75 @@ You also need:
 
 ## Quick Start
 
-### Option A — One command (recommended)
+### Deploy to AWS Cloud (Recommended)
 
-**macOS / Linux:**
+**One command deploys everything:**
 ```bash
 ./bin/setup.sh
 ```
 
-**Windows (PowerShell):**
-```powershell
-powershell -ExecutionPolicy Bypass -File bin\setup.ps1
-```
-
-This single script will:
-1. Check prerequisites (AWS CLI, Terraform, Docker)
+This script will:
+1. Check prerequisites (AWS CLI, Terraform)
 2. Prompt for AWS credentials (if not configured)
 3. Prompt for a unique S3 bucket name
-4. Run `terraform init` → `plan` → `apply`
-5. Upload the PySpark script to S3
-6. Generate the Airflow `.env` file
-7. Start Airflow with Docker Compose
+4. Deploy infrastructure (EC2, EMR, S3, Glue, Athena)
+5. Deploy Airflow to the EC2 instance automatically
+6. Start Airflow in the cloud
 
-To tear everything down:
-- **macOS / Linux:** `./bin/teardown.sh`
-- **Windows:** `powershell -ExecutionPolicy Bypass -File bin\teardown.ps1`
+Access Airflow at `http://<EC2_IP>:8080` (admin/admin)
 
-To check costs:
-- **macOS / Linux:** `./bin/cost-check.sh`
-- **Windows:** `powershell -ExecutionPolicy Bypass -File bin\cost-check.ps1`
-
----
-
-### Option B — Manual steps
-
+**Cost management:**
 ```bash
-cd terraform/
-cp example.tfvars terraform.tfvars
+./bin/stop-airflow.sh    # Stop Airflow when idle (~$7.50/month for EC2 only)
+./bin/start-airflow.sh   # Restart when needed
+./bin/teardown.sh        # Destroy everything
 ```
 
-Edit **`terraform.tfvars`**:
+**Estimated costs:** ~$15-30/month
+- EC2 t3.micro (24/7): ~$7.50/month  
+- S3 storage: ~$1-5/month
+- EMR: Pay per use (only when DAGs run)
 
-| Variable        | What to change                                                   |
-| --------------- | ---------------------------------------------------------------- |
-| `bucket_name`   | Must be globally unique — e.g. `yourname-bigdata-data-lake`      |
-| `allowed_cidr`  | Lock down to your IP — e.g. `"203.0.113.10/32"`                 |
+### Local Development (Optional)
 
-### 2 — Deploy infrastructure
-
+Run Airflow locally for testing:
 ```bash
-terraform init
-terraform plan  -var-file="terraform.tfvars"
-terraform apply -var-file="terraform.tfvars"
-```
-
-Save the outputs — you'll need `s3_bucket_name` and `airflow_public_ip`.
-
-### 3 — Upload PySpark script
-
-```bash
-BUCKET=$(terraform output -raw s3_bucket_name)
-
-aws s3 cp ../scripts/ingest.py "s3://${BUCKET}/scripts/ingest.py"
-```
-
-### 4 — Start Airflow with Docker
-
-```bash
-cd ../airflow/
-cp .env.example .env          # edit: AWS creds, S3_BUCKET, and Kaggle creds for raw landing
+cd airflow/
+cp .env.example .env    # Edit with AWS credentials
 docker compose up -d
 ```
 
-Open **http://localhost:8080** — login **admin / admin**.
+Access at http://localhost:8080
 
-### 5 — Run the ingest pipeline
+---
+
+## Manual Deployment Steps
+
+If you prefer more control:
+
+**1. Configure Terraform:**
+```bash
+cd terraform/
+cp example.tfvars terraform.tfvars
+# Edit terraform.tfvars with your bucket name and IP
+```
+
+**2. Deploy infrastructure:**
+```bash
+terraform init
+terraform plan -var-file="terraform.tfvars"
+terraform apply -var-file="terraform.tfvars"
+```
+
+**3. Deploy Airflow to EC2:**
+```bash
+cd ..
+./bin/deploy-airflow-to-ec2.sh ~/.ssh/your-key.pem
+```
+
+---
+
+## Running the Pipeline
 
 In the Airflow UI:
 

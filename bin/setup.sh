@@ -188,7 +188,40 @@ if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
 fi
 
 ###############################################################################
-# Step 4 — Terraform deploy
+# Step 4 — Create/check SSH key pair
+###############################################################################
+echo ""
+info "Checking SSH key pair for EC2 access..."
+
+KEY_NAME="bigdata-project-airflow"
+SSH_KEY="$HOME/.ssh/${KEY_NAME}.pem"
+
+# Check if key pair exists in AWS
+if aws ec2 describe-key-pairs --key-names "$KEY_NAME" >/dev/null 2>&1; then
+  ok "AWS key pair '$KEY_NAME' exists"
+  if [ -f "$SSH_KEY" ]; then
+    ok "Local SSH key found: $SSH_KEY"
+  else
+    warn "Local SSH key not found at $SSH_KEY"
+    warn "You may need to recreate the key pair if you lost the private key."
+    read -rp "  Delete and recreate key pair? [y/N]: " RECREATE_KEY
+    if [[ "$RECREATE_KEY" =~ ^[Yy]$ ]]; then
+      aws ec2 delete-key-pair --key-name "$KEY_NAME"
+      info "Creating new key pair..."
+      aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$SSH_KEY"
+      chmod 400 "$SSH_KEY"
+      ok "Created new key pair: $SSH_KEY"
+    fi
+  fi
+else
+  info "Creating AWS key pair '$KEY_NAME'..."
+  aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$SSH_KEY"
+  chmod 400 "$SSH_KEY"
+  ok "Created key pair: $SSH_KEY"
+fi
+
+###############################################################################
+# Step 5 — Terraform deploy
 ###############################################################################
 echo ""
 info "Deploying infrastructure with Terraform..."
@@ -202,10 +235,10 @@ aws_region  = "$AWS_REGION"
 project     = "bigdata-project"
 bucket_name = "$BUCKET_NAME"
 
-key_name     = ""
+key_name     = "$KEY_NAME"
 allowed_cidr = "0.0.0.0/0"
 
-airflow_instance_type    = "t3.micro"
+airflow_instance_type    = "t3.small"
 emr_master_instance_type = "m5.xlarge"
 emr_core_instance_type   = "m5.xlarge"
 emr_task_instance_type   = "m5.xlarge"
@@ -271,7 +304,7 @@ SUBNET_ID=$(aws ec2 describe-subnets \
   --query "Subnets[0].SubnetId" --output text 2>/dev/null || echo "")
 
 ###############################################################################
-# Step 5 — Upload PySpark script to S3
+# Step 6 — Upload PySpark script to S3
 ###############################################################################
 echo ""
 info "Uploading PySpark script to S3..."
@@ -281,7 +314,7 @@ ok "Uploaded ingest.py → s3://${S3_BUCKET}/scripts/"
 
 
 ###############################################################################
-# Step 6 — Generate Airflow .env
+# Step 7 — Generate Airflow .env
 ###############################################################################
 echo ""
 info "Generating Airflow .env file..."
@@ -327,39 +360,149 @@ fi
 ok "Created airflow/.env with bucket: $S3_BUCKET"
 
 ###############################################################################
-# Step 7 — Start Airflow with Docker Compose
+# Step 8 — Deploy Airflow to EC2
 ###############################################################################
 echo ""
-info "Starting Airflow with Docker Compose..."
+info "Deploying Airflow to EC2 instance..."
 echo ""
 
+# Check if we have an EC2 instance
+if [ -z "$AIRFLOW_IP" ]; then
+  warn "No EC2 Airflow instance found in Terraform outputs."
+  warn "Skipping cloud deployment."
+else
+  if [ ! -f "$SSH_KEY" ]; then
+    warn "SSH key not found at $SSH_KEY"
+    warn "Skipping EC2 deployment. To deploy later, run:"
+    warn "  ./bin/deploy-airflow-to-ec2.sh $SSH_KEY"
+  else
+    info "SSH key found: $SSH_KEY"
+    info "Deploying to EC2 at $AIRFLOW_IP..."
+
+    # Wait for instance to be ready
+    info "Waiting for EC2 instance to be ready (this may take 2-3 minutes)..."
+    sleep 30
+
+    # Test SSH connection with retries
+    MAX_RETRIES=10
+    RETRY_COUNT=0
+    while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+      if ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 ec2-user@"$AIRFLOW_IP" "echo 'SSH ready'" >/dev/null 2>&1; then
+        ok "SSH connection successful!"
+        break
+      else
+        RETRY_COUNT=$((RETRY_COUNT + 1))
+        if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+          info "SSH not ready yet, retrying in 10 seconds... ($RETRY_COUNT/$MAX_RETRIES)"
+          sleep 10
+        else
+          warn "Could not establish SSH connection after $MAX_RETRIES attempts."
+          warn "The instance may still be booting. To deploy later, run:"
+          warn "  ./bin/deploy-airflow-to-ec2.sh $SSH_KEY"
+          break
+        fi
+      fi
+    done
+
+    # If SSH is ready, deploy
+    if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+      # Create directories on EC2
+      info "Creating directories on EC2..."
+      ssh -i "$SSH_KEY" ec2-user@"$AIRFLOW_IP" "mkdir -p ~/big-data-project/airflow/{dags,logs,plugins} ~/big-data-project/scripts"
+
+      # Sync Airflow files
+      info "Syncing Airflow files to EC2..."
+      rsync -avz --progress -e "ssh -i $SSH_KEY" \
+        --exclude 'logs/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '.env' \
+        "$AIRFLOW_DIR/" ec2-user@"$AIRFLOW_IP":~/big-data-project/airflow/
+
+      # Sync scripts
+      info "Syncing scripts to EC2..."
+      rsync -avz --progress -e "ssh -i $SSH_KEY" \
+        --exclude '__pycache__/' --exclude '*.pyc' \
+        "$SCRIPTS_DIR/" ec2-user@"$AIRFLOW_IP":~/big-data-project/scripts/
+
+      # Create .env on EC2
+      info "Creating .env file on EC2..."
+      ssh -i "$SSH_KEY" ec2-user@"$AIRFLOW_IP" "cat > ~/big-data-project/airflow/.env" <<ENVEOF
+# Auto-generated by setup.sh — $(date)
+
+# Airflow core
+AIRFLOW_UID=50000
+AIRFLOW__CORE__EXECUTOR=LocalExecutor
+AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+AIRFLOW__CORE__FERNET_KEY=ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=
+AIRFLOW__WEBSERVER__SECRET_KEY=supersecretkey
+AIRFLOW__CORE__LOAD_EXAMPLES=False
+
+# AWS
+AWS_DEFAULT_REGION=${AWS_REGION}
+AWS_REGION=${AWS_REGION}
+S3_BUCKET=${S3_BUCKET}
+
+# Dataset
+DATASET_SUBDIR=airline_data
+ENVEOF
+
+      # Start Docker Compose on EC2
+      info "Starting Airflow on EC2..."
+      ssh -i "$SSH_KEY" ec2-user@"$AIRFLOW_IP" << 'ENDSSH'
+cd ~/big-data-project/airflow
+docker compose down 2>/dev/null || true
 docker compose up -d --build
+echo "Waiting for Airflow to start..."
+sleep 45
+docker compose ps
+ENDSSH
 
-echo ""
-ok "Airflow is starting up!"
+      ok "Airflow deployed to EC2 successfully!"
+      DEPLOY_SUCCESS=true
+    fi
+  fi
+fi
 
 ###############################################################################
-# Step 8 — Summary
+# Step 9 — Summary
 ###############################################################################
 echo ""
 echo "============================================="
 echo -e "  ${GREEN}✅ Setup complete!${NC}"
 echo "============================================="
 echo ""
-echo "  Airflow UI:   http://localhost:8080"
-echo "  Login:        admin / admin"
-echo ""
-echo "  S3 Bucket:    $S3_BUCKET"
-if [ -n "$AIRFLOW_IP" ]; then
-echo "  EC2 Airflow:  http://${AIRFLOW_IP}:8080 (if using EC2)"
+
+if [ -n "$AIRFLOW_IP" ] && [ "${DEPLOY_SUCCESS:-false}" = "true" ]; then
+  echo "  Airflow UI:   http://${AIRFLOW_IP}:8080"
+  echo "  Login:        admin / admin"
+  echo ""
+  echo "  S3 Bucket:    $S3_BUCKET"
+  echo ""
+  echo "  SSH Access:   ssh -i $SSH_KEY ec2-user@$AIRFLOW_IP"
+  echo ""
+  echo "  Next steps:"
+  echo "    1. Open http://${AIRFLOW_IP}:8080"
+  echo "    2. Unpause the 'big_data_pipeline' DAG"
+  echo "    3. Click 'Trigger DAG' to run the pipeline"
+  echo ""
+  echo "  To update DAGs after changes:"
+  echo "    ./bin/deploy-airflow-to-ec2.sh"
+  echo ""
+  echo "  To stop Airflow (save costs):"
+  echo "    ./bin/stop-airflow.sh"
+  echo ""
+  echo "  To restart Airflow:"
+  echo "    ./bin/start-airflow.sh"
+else
+  echo "  S3 Bucket:    $S3_BUCKET"
+  if [ -n "$AIRFLOW_IP" ]; then
+    echo "  EC2 IP:       $AIRFLOW_IP"
+  fi
+  echo ""
+  echo "  Airflow was not deployed to EC2 in this run."
+  echo "  To deploy manually:"
+  echo "    ./bin/deploy-airflow-to-ec2.sh"
 fi
 echo ""
-echo "  Next steps:"
-echo "    1. Open http://localhost:8080"
-echo "    2. Unpause the 'big_data_pipeline' DAG"
-echo "    3. Click 'Trigger DAG' to run the pipeline"
-echo ""
 echo "  To tear everything down:"
-echo "    ./teardown.sh"
+echo "    ./bin/teardown.sh"
 echo ""
 

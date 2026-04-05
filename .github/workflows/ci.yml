@@ -30,6 +30,20 @@ jobs:
           # Warn on complexity and style (but don't fail)
           flake8 airflow/dags scripts --count --max-complexity=10 --max-line-length=127 --statistics || true
 
+  emr-python-compat:
+    name: EMR Python Compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check EMR Spark script compatibility
+        run: python bin/check_emr_python_compat.py
+
   airflow-dag-validation:
     name: Validate Airflow DAGs
     runs-on: ubuntu-latest
