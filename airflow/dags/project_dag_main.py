@@ -51,6 +51,11 @@ with DAG(
     catchup=False,
     tags=["big-data", "orchestration"],
 ) as dag:
+    shared_cluster_conf = {
+        "cluster_id": "{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
+        "manage_cluster": False,
+    }
+
     t_create_emr_cluster = PythonOperator(
         task_id="create_emr_cluster",
         python_callable=task_create_emr_cluster,
@@ -64,10 +69,15 @@ with DAG(
     t_run_ingest_pipeline = TriggerDagRunOperator(
         task_id="run_ingest_pipeline",
         trigger_dag_id="project_dag_ingest",
-        conf={
-            "cluster_id": "{{ ti.xcom_pull(task_ids='create_emr_cluster') }}",
-            "manage_cluster": False,
-        },
+        conf=shared_cluster_conf,
+        wait_for_completion=True,
+        poke_interval=30,
+    )
+
+    t_run_merge_pipeline = TriggerDagRunOperator(
+        task_id="run_merge_pipeline",
+        trigger_dag_id="project_dag_merge",
+        conf=shared_cluster_conf,
         wait_for_completion=True,
         poke_interval=30,
     )
@@ -82,5 +92,6 @@ with DAG(
         t_create_emr_cluster
         >> t_wait_for_cluster_ready
         >> t_run_ingest_pipeline
+        >> t_run_merge_pipeline
         >> t_terminate_emr_cluster
     )
