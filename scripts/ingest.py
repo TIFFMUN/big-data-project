@@ -13,11 +13,13 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import sys
 from typing import List, Sequence
 
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, Observation, SparkSession
+from pyspark.sql.column import Column
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -143,6 +145,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--app-name",
         default="BigDataProject-AirlineIngest",
         help="Spark application name.",
+    )
+    parser.add_argument(
+        "--metrics-output-path",
+        default=None,
+        help="Optional S3 prefix for a run-scoped ingest metrics payload.",
     )
     return parser.parse_args(argv)
 
@@ -366,6 +373,35 @@ def transform_airline_dataframe(df: DataFrame) -> DataFrame:
     return transformed
 
 
+def zero_safe_count_if(condition) -> Column:
+    return F.coalesce(F.sum(F.when(condition, 1).otherwise(0)), F.lit(0))
+
+
+def observe_ingest_metrics(df: DataFrame) -> tuple[DataFrame, Observation]:
+    observation = Observation("ingest_metrics")
+    observed_df = df.observe(
+        observation,
+        F.count(F.lit(1)).alias("processed_row_count"),
+        zero_safe_count_if(F.col("has_valid_flight_date")).alias("valid_flight_date_count"),
+        zero_safe_count_if(~F.col("has_valid_flight_date")).alias("invalid_flight_date_count"),
+        zero_safe_count_if(F.col("has_reasonable_flight_date_parts")).alias(
+            "reasonable_flight_date_parts_count"
+        ),
+        zero_safe_count_if(F.col("is_cancelled")).alias("cancelled_row_count"),
+        zero_safe_count_if(F.col("is_diverted")).alias("diverted_row_count"),
+        zero_safe_count_if(F.col("usable_for_dep_delay_metrics")).alias(
+            "usable_for_dep_delay_metrics_count"
+        ),
+        zero_safe_count_if(F.col("usable_for_arr_delay_metrics")).alias(
+            "usable_for_arr_delay_metrics_count"
+        ),
+        zero_safe_count_if(F.col("year").isNull() | F.col("month").isNull()).alias(
+            "null_partition_key_row_count"
+        ),
+    )
+    return observed_df, observation
+
+
 def list_input_files(spark: SparkSession, input_path: str) -> List[str]:
     jvm = spark._jvm
     hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
@@ -404,6 +440,50 @@ def list_input_files(spark: SparkSession, input_path: str) -> List[str]:
     return selected_files
 
 
+def delete_output_path_if_exists(spark: SparkSession, output_path: str) -> None:
+    jvm = spark._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path_class = jvm.org.apache.hadoop.fs.Path
+    file_system = jvm.org.apache.hadoop.fs.FileSystem.get(
+        jvm.java.net.URI.create(output_path),
+        hadoop_conf,
+    )
+    path = path_class(output_path)
+    if file_system.exists(path):
+        file_system.delete(path, True)
+
+
+def write_metrics_payload(
+    spark: SparkSession,
+    metrics: dict[str, object],
+    output_path: str,
+) -> None:
+    delete_output_path_if_exists(spark, output_path)
+    payload = json.dumps(metrics, sort_keys=True)
+    spark.sparkContext.parallelize([payload], 1).saveAsTextFile(output_path)
+    print(f"Wrote ingest metrics payload to {output_path}")
+
+
+def build_metrics_payload(
+    observation: Observation,
+    input_files: Sequence[str],
+    input_path: str,
+    output_path: str,
+) -> dict[str, object]:
+    observed_metrics = {
+        key: int(value) if value is not None else 0
+        for key, value in observation.get.items()
+    }
+    observed_metrics.update(
+        {
+            "input_file_count": len(input_files),
+            "input_path": input_path,
+            "output_path": output_path,
+        }
+    )
+    return observed_metrics
+
+
 def write_processed_data(df: DataFrame, output_path: str) -> None:
     partition_columns = [name for name in ("year", "month") if name in df.columns]
     writer = df.write.mode("overwrite")
@@ -435,8 +515,19 @@ def main(argv: Sequence[str]) -> int:
         )
 
         processed_df = transform_airline_dataframe(raw_df)
-        processed_df.printSchema()
-        write_processed_data(processed_df, args.output_path)
+        observed_df, observation = observe_ingest_metrics(processed_df)
+        observed_df.printSchema()
+        write_processed_data(observed_df, args.output_path)
+        metrics_payload = build_metrics_payload(
+            observation=observation,
+            input_files=input_files,
+            input_path=args.input_path,
+            output_path=args.output_path,
+        )
+        print("Ingest metrics summary:")
+        print(json.dumps(metrics_payload, indent=2, sort_keys=True))
+        if args.metrics_output_path:
+            write_metrics_payload(spark, metrics_payload, args.metrics_output_path)
         print(f"Wrote curated partitioned Parquet output to {args.output_path}")
     finally:
         spark.stop()

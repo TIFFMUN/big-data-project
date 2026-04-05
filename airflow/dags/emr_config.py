@@ -2,8 +2,11 @@
 Shared Airflow configuration and helper functions for the current project DAGs.
 """
 
+import json
 import os
+import re
 import time
+from datetime import datetime, timezone
 from typing import Sequence
 
 import boto3
@@ -11,6 +14,26 @@ import boto3
 
 def join_s3_key(*parts: str) -> str:
     return "/".join(part.strip("/") for part in parts if part)
+
+
+def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    if not s3_uri.startswith("s3://"):
+        raise ValueError(f"Expected S3 URI, got: {s3_uri}")
+    without_scheme = s3_uri[5:]
+    bucket, _, key = without_scheme.partition("/")
+    if not bucket:
+        raise ValueError(f"Missing S3 bucket in URI: {s3_uri}")
+    return bucket, key.rstrip("/")
+
+
+def sanitize_s3_key_segment(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._=-]+", "_", value)
+    return sanitized.strip("_") or "unknown"
+
+
+def build_ingest_metrics_path(run_id: str) -> str:
+    safe_run_id = sanitize_s3_key_segment(run_id)
+    return f"s3://{S3_BUCKET}/{join_s3_key(INGEST_METRICS_PREFIX, safe_run_id)}/"
 
 
 S3_BUCKET = os.getenv("S3_BUCKET", "bigdata-project-data-lake")
@@ -32,6 +55,8 @@ RAW_DATASET_PREFIX = join_s3_key("raw", DATASET_SUBDIR)
 PROCESSED_DATASET_PREFIX = join_s3_key("processed", DATASET_SUBDIR)
 Q1_MERGED_PREFIX = join_s3_key("processed", "question_1", "merged")
 Q1_AGGREGATED_PREFIX = join_s3_key("processed", "question_1", "aggregated")
+METRICS_PREFIX = join_s3_key("metrics", DATASET_SUBDIR)
+INGEST_METRICS_PREFIX = join_s3_key(METRICS_PREFIX, "ingest")
 LOG_PREFIX = join_s3_key("emr-logs")
 
 LOG_URI = f"s3://{S3_BUCKET}/{LOG_PREFIX}/"
@@ -43,6 +68,7 @@ RAW_DATASET_PATH = f"s3://{S3_BUCKET}/{RAW_DATASET_PREFIX}/"
 PROCESSED_DATASET_PATH = f"s3://{S3_BUCKET}/{PROCESSED_DATASET_PREFIX}/"
 Q1_MERGED_PATH = f"s3://{S3_BUCKET}/{Q1_MERGED_PREFIX}/"
 Q1_AGGREGATED_PATH = f"s3://{S3_BUCKET}/{Q1_AGGREGATED_PREFIX}/"
+INGEST_METRICS_PATH = f"s3://{S3_BUCKET}/{INGEST_METRICS_PREFIX}/"
 
 emr_client = boto3.client("emr", region_name=REGION)
 glue_client = boto3.client("glue", region_name=REGION)
@@ -177,12 +203,19 @@ def submit_spark_script_step(
     return step_id
 
 
-def submit_spark_step(cluster_id: str) -> str:
+def submit_spark_step(
+    cluster_id: str,
+    metrics_output_path: str | None = None,
+) -> str:
+    script_args = [RAW_DATASET_PATH, PROCESSED_DATASET_PATH]
+    if metrics_output_path:
+        script_args.extend(["--metrics-output-path", metrics_output_path])
+
     return submit_spark_script_step(
         cluster_id=cluster_id,
         step_name="Airline-Ingest-PySpark-Step",
         script_s3_uri=SCRIPT_S3_URI,
-        script_args=[RAW_DATASET_PATH, PROCESSED_DATASET_PATH],
+        script_args=script_args,
     )
 
 
@@ -227,13 +260,77 @@ def submit_aggregate_spark_step(
 def wait_for_step(cluster_id: str, step_id: str) -> bool:
     while True:
         desc = emr_client.describe_step(ClusterId=cluster_id, StepId=step_id)
-        state = desc["Step"]["Status"]["State"]
-        print(f"Step {step_id} state: {state}")
+        status = desc["Step"]["Status"]
+        state = status["State"]
+        timeline = status.get("Timeline", {})
+        started_at = timeline.get("StartDateTime") or timeline.get("CreationDateTime")
+        ended_at = timeline.get("EndDateTime")
+        reason = status.get("StateChangeReason", {}).get("Message")
+        failure_details = status.get("FailureDetails", {})
+
+        elapsed = None
+        if started_at:
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            reference_time = ended_at or datetime.now(timezone.utc)
+            if reference_time.tzinfo is None:
+                reference_time = reference_time.replace(tzinfo=timezone.utc)
+            elapsed = f"{int((reference_time - started_at).total_seconds())}s"
+
+        log_parts = [f"Step {step_id} on cluster {cluster_id} state: {state}"]
+        if elapsed:
+            log_parts.append(f"elapsed={elapsed}")
+        if reason:
+            log_parts.append(f"reason={reason}")
+
+        failure_reason = failure_details.get("Reason")
+        failure_message = failure_details.get("Message")
+        failure_log_file = failure_details.get("LogFile")
+        if failure_reason:
+            log_parts.append(f"failure_reason={failure_reason}")
+        if failure_message:
+            log_parts.append(f"failure_message={failure_message}")
+        if failure_log_file:
+            log_parts.append(f"failure_log={failure_log_file}")
+
+        log_message = " | ".join(log_parts)
+        print(log_message)
         if state == "COMPLETED":
             return True
         if state in ("CANCELLED", "FAILED", "INTERRUPTED"):
-            raise RuntimeError(f"Step {step_id} ended with state {state}")
+            raise RuntimeError(log_message)
         time.sleep(30)
+
+
+def read_latest_text_payload_from_s3_prefix(s3_uri: str) -> tuple[str, str]:
+    bucket, key_prefix = parse_s3_uri(s3_uri)
+    response = s3_client.list_objects_v2(
+        Bucket=bucket,
+        Prefix=f"{key_prefix.rstrip('/')}/",
+    )
+    candidates = [
+        item
+        for item in response.get("Contents", [])
+        if not item["Key"].endswith("/")
+        and not item["Key"].endswith("_SUCCESS")
+        and not item["Key"].endswith(".crc")
+    ]
+    if not candidates:
+        raise FileNotFoundError(f"No payload files found under {s3_uri}")
+
+    latest = max(candidates, key=lambda item: item["LastModified"])
+    body = s3_client.get_object(Bucket=bucket, Key=latest["Key"])["Body"].read()
+    return body.decode("utf-8").strip(), f"s3://{bucket}/{latest['Key']}"
+
+
+def log_metrics_from_s3_prefix(s3_uri: str) -> str:
+    payload, payload_uri = read_latest_text_payload_from_s3_prefix(s3_uri)
+    print(f"Loaded metrics payload from {payload_uri}")
+    try:
+        print(json.dumps(json.loads(payload), indent=2, sort_keys=True))
+    except json.JSONDecodeError:
+        print(payload)
+    return payload
 
 
 def terminate_emr_cluster(cluster_id: str) -> None:
