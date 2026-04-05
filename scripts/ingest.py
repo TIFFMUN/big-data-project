@@ -12,6 +12,8 @@ Usage:
         s3://bucket/processed/airline_data/
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import re

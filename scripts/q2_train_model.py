@@ -2,6 +2,8 @@
 Train the Q2 Spark ML model for expected in-air delay.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
