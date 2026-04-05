@@ -60,3 +60,8 @@ resource "aws_s3_object" "processed_prefix" {
   content = ""
 }
 
+resource "aws_s3_object" "models_prefix" {
+  bucket  = aws_s3_bucket.data_lake.id
+  key     = "models/"
+  content = ""
+}

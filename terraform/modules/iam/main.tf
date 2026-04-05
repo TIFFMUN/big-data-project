@@ -159,7 +159,8 @@ resource "aws_iam_policy" "emr_ec2" {
         Resource = [
           var.bucket_arn,
           "${var.bucket_arn}/raw/*",
-          "${var.bucket_arn}/scripts/*"
+          "${var.bucket_arn}/scripts/*",
+          "${var.bucket_arn}/models/*"
         ]
       },
       {
@@ -170,6 +171,15 @@ resource "aws_iam_policy" "emr_ec2" {
           "s3:DeleteObject"
         ]
         Resource = "${var.bucket_arn}/processed/*"
+      },
+      {
+        Sid    = "S3WriteModels"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${var.bucket_arn}/models/*"
       },
       {
         Sid    = "S3WriteEMRLogs"
@@ -354,5 +364,3 @@ resource "aws_iam_role_policy_attachment" "athena" {
   role       = aws_iam_role.athena.name
   policy_arn = aws_iam_policy.athena.arn
 }
-
-

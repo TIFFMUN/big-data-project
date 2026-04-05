@@ -1,7 +1,11 @@
 """
 Main orchestration DAG for the current project.
 
-At the moment it delegates to the ingest pipeline DAG.
+Regular pipeline behavior:
+1. Refresh the curated airline dataset
+2. Run Q2 inference using the currently active trained model
+
+Training is intentionally separate and must be triggered via project_dag_q2_train.
 """
 
 from datetime import datetime, timedelta
@@ -34,4 +38,11 @@ with DAG(
         poke_interval=30,
     )
 
-    t_run_ingest_pipeline
+    t_run_q2_inference_pipeline = TriggerDagRunOperator(
+        task_id="run_q2_inference_pipeline",
+        trigger_dag_id="project_dag_q2_inference",
+        wait_for_completion=True,
+        poke_interval=30,
+    )
+
+    t_run_ingest_pipeline >> t_run_q2_inference_pipeline

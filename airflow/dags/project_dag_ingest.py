@@ -19,6 +19,7 @@ import sys
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.sensors.python import PythonSensor
+from airflow.utils.trigger_rule import TriggerRule
 
 from emr_config import (
     REGION,
@@ -26,7 +27,7 @@ from emr_config import (
     S3_BUCKET,
     check_crawler_status,
     create_emr_cluster,
-    submit_spark_step,
+    submit_ingest_spark_step,
     terminate_emr_cluster,
     trigger_glue_crawler,
     upload_ingest_script,
@@ -67,25 +68,26 @@ def task_create_emr_cluster(**context):
 
 
 def task_wait_for_cluster_ready(**context):
-    cluster_id = context["ti"].xcom_pull(key="cluster_id")
+    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     return wait_for_cluster(cluster_id)
 
 
 def task_submit_spark_step(**context):
-    cluster_id = context["ti"].xcom_pull(key="cluster_id")
-    step_id = submit_spark_step(cluster_id)
+    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
+    step_id = submit_ingest_spark_step(cluster_id)
     context["ti"].xcom_push(key="step_id", value=step_id)
 
 
 def task_wait_for_step_completion(**context):
-    cluster_id = context["ti"].xcom_pull(key="cluster_id")
-    step_id = context["ti"].xcom_pull(key="step_id")
+    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
+    step_id = context["ti"].xcom_pull(task_ids="submit_spark_step", key="step_id")
     return wait_for_step(cluster_id, step_id)
 
 
 def task_terminate_emr_cluster(**context):
-    cluster_id = context["ti"].xcom_pull(key="cluster_id")
-    terminate_emr_cluster(cluster_id)
+    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
+    if cluster_id:
+        terminate_emr_cluster(cluster_id)
 
 
 def task_trigger_glue_crawler(**context):
@@ -149,6 +151,7 @@ with DAG(
     t_terminate = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     t_crawl = PythonOperator(
