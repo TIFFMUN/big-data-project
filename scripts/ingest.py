@@ -396,6 +396,11 @@ def write_processed_data(df: DataFrame, output_path: str) -> None:
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     spark = SparkSession.builder.appName(args.app_name).getOrCreate()
+    # Preserve Spark 2 / legacy Parquet compatibility when writing historical
+    # date/timestamp values. Using LEGACY avoids Spark upgrade-era rebase issues
+    # (including SparkUpgradeException for pre-1582 dates / legacy INT96 data)
+    # and keeps output consistent with existing downstream readers; CORRECTED
+    # would change persisted semantics and is not the intended behavior here.
     spark.conf.set("spark.sql.parquet.datetimeRebaseModeInWrite", "LEGACY")
     spark.conf.set("spark.sql.parquet.int96RebaseModeInWrite", "LEGACY")
 
