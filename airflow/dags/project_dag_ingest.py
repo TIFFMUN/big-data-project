@@ -28,6 +28,12 @@ from emr_config import (
     wait_for_cluster,
     wait_for_step,
 )
+from dag_utils import (
+    get_dag_run_conf,
+    get_external_cluster_id,
+    get_manage_cluster,
+    parse_manage_cluster,
+)
 
 
 def add_scripts_dir_to_path() -> None:
@@ -42,41 +48,6 @@ def add_scripts_dir_to_path() -> None:
 
 add_scripts_dir_to_path()
 from load_kaggle_raw_to_s3 import download_kaggle_to_s3_raw  # noqa: E402
-
-
-def get_dag_run_conf(context) -> dict:
-    dag_run = context.get("dag_run")
-    if dag_run is None or dag_run.conf is None:
-        return {}
-    return dict(dag_run.conf)
-
-
-def parse_manage_cluster(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return True
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"false", "0", "no"}:
-            return False
-        if normalized in {"true", "1", "yes"}:
-            return True
-    return bool(value)
-
-
-def get_manage_cluster(context) -> bool:
-    conf = get_dag_run_conf(context)
-    return parse_manage_cluster(conf.get("manage_cluster", True))
-
-
-def get_external_cluster_id(context) -> str | None:
-    conf = get_dag_run_conf(context)
-    cluster_id = conf.get("cluster_id")
-    if cluster_id is None:
-        return None
-    cluster_id = str(cluster_id).strip()
-    return cluster_id or None
 
 
 def task_land_raw_dataset(**context):

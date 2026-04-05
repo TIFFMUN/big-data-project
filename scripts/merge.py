@@ -99,9 +99,19 @@ def merge_with_holidays(
     days_after: int,
 ) -> DataFrame:
     original_columns = flights_df.columns
+    internal_row_id_column = "_merge_row_id"
+    if internal_row_id_column in original_columns:
+        raise ValueError(
+            f"Curated input contains reserved internal column: {internal_row_id_column}"
+        )
     flights_with_row_id = flights_df.withColumn(
-        "_merge_row_id",
+        internal_row_id_column,
         F.monotonically_increasing_id(),
+    )
+
+    days_from_holiday_expr = F.datediff(
+        F.col("f.flight_date"),
+        F.col("h.holiday_date"),
     )
 
     joined = (
@@ -109,19 +119,13 @@ def merge_with_holidays(
         .join(
             F.broadcast(holidays_df).alias("h"),
             F.col("f.flight_date").isNotNull()
-            & (
-                F.datediff(F.col("f.flight_date"), F.col("h.holiday_date"))
-                >= F.lit(-days_before)
-            )
-            & (
-                F.datediff(F.col("f.flight_date"), F.col("h.holiday_date"))
-                <= F.lit(days_after)
-            ),
+            & (days_from_holiday_expr >= F.lit(-days_before))
+            & (days_from_holiday_expr <= F.lit(days_after)),
             "left",
         )
         .withColumn(
             "days_from_holiday",
-            F.datediff(F.col("f.flight_date"), F.col("h.holiday_date")),
+            days_from_holiday_expr,
         )
     )
 

@@ -14,7 +14,14 @@ from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 
+from dag_utils import (
+    get_dag_run_conf,
+    get_external_cluster_id,
+    get_manage_cluster,
+    parse_manage_cluster,
+)
 from emr_config import (
     create_emr_cluster,
     submit_merge_spark_step,
@@ -25,44 +32,8 @@ from emr_config import (
     wait_for_step,
 )
 
-
 DEFAULT_DAYS_BEFORE = 7
 DEFAULT_DAYS_AFTER = 7
-
-
-def get_dag_run_conf(context) -> dict:
-    dag_run = context.get("dag_run")
-    if dag_run is None or dag_run.conf is None:
-        return {}
-    return dict(dag_run.conf)
-
-
-def parse_manage_cluster(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return True
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"false", "0", "no"}:
-            return False
-        if normalized in {"true", "1", "yes"}:
-            return True
-    return bool(value)
-
-
-def get_manage_cluster(context) -> bool:
-    conf = get_dag_run_conf(context)
-    return parse_manage_cluster(conf.get("manage_cluster", True))
-
-
-def get_external_cluster_id(context) -> str | None:
-    conf = get_dag_run_conf(context)
-    cluster_id = conf.get("cluster_id")
-    if cluster_id is None:
-        return None
-    cluster_id = str(cluster_id).strip()
-    return cluster_id or None
 
 
 def task_upload_holiday_reference(**context):
@@ -191,6 +162,7 @@ with DAG(
     t_terminate = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     (
