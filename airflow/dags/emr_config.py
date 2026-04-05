@@ -4,6 +4,7 @@ Shared Airflow configuration and helper functions for the current project DAGs.
 
 import os
 import time
+from typing import Sequence
 
 import boto3
 
@@ -23,27 +24,41 @@ EMR_EC2_PROFILE = "bigdata-project-emr-ec2-profile"
 GLUE_CRAWLER = "bigdata-project-processed-crawler"
 DATASET_SUBDIR = os.getenv("DATASET_SUBDIR", "airline_data")
 
-INGEST_SCRIPT_KEY = join_s3_key("scripts", "ingest.py")
+SCRIPT_KEY = join_s3_key("scripts", "ingest.py")
+MERGE_SCRIPT_KEY = join_s3_key("scripts", "merge.py")
+AGGREGATE_SCRIPT_KEY = join_s3_key("scripts", "aggregate.py")
 Q2_BUILD_FEATURES_KEY = join_s3_key("scripts", "q2_build_features.py")
 Q2_TRAIN_MODEL_KEY = join_s3_key("scripts", "q2_train_model.py")
 Q2_BATCH_INFERENCE_KEY = join_s3_key("scripts", "q2_batch_inference.py")
 
+HOLIDAY_REFERENCE_KEY = join_s3_key("raw", "reference", "holiday_reference.csv")
 RAW_DATASET_PREFIX = join_s3_key("raw", DATASET_SUBDIR)
 PROCESSED_DATASET_PREFIX = join_s3_key("processed", DATASET_SUBDIR)
+
+Q1_MERGED_PREFIX = join_s3_key("processed", "question_1", "merged")
+Q1_AGGREGATED_PREFIX = join_s3_key("processed", "question_1", "aggregated")
+
 Q2_FEATURES_PREFIX = join_s3_key("processed", "q2_features")
 Q2_EVAL_PREFIX = join_s3_key("processed", "q2_model_eval")
 Q2_PREDICTIONS_PREFIX = join_s3_key("processed", "q2_predictions")
 Q2_MODEL_PREFIX = join_s3_key("models", "q2_in_air_delay")
+
 LOG_PREFIX = join_s3_key("emr-logs")
 
 LOG_URI = f"s3://{S3_BUCKET}/{LOG_PREFIX}/"
-INGEST_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{INGEST_SCRIPT_KEY}"
+SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{SCRIPT_KEY}"
+MERGE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{MERGE_SCRIPT_KEY}"
+AGGREGATE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{AGGREGATE_SCRIPT_KEY}"
 Q2_BUILD_FEATURES_S3_URI = f"s3://{S3_BUCKET}/{Q2_BUILD_FEATURES_KEY}"
 Q2_TRAIN_MODEL_S3_URI = f"s3://{S3_BUCKET}/{Q2_TRAIN_MODEL_KEY}"
 Q2_BATCH_INFERENCE_S3_URI = f"s3://{S3_BUCKET}/{Q2_BATCH_INFERENCE_KEY}"
+HOLIDAY_REFERENCE_S3_URI = f"s3://{S3_BUCKET}/{HOLIDAY_REFERENCE_KEY}"
 
 RAW_DATASET_PATH = f"s3://{S3_BUCKET}/{RAW_DATASET_PREFIX}/"
 PROCESSED_DATASET_PATH = f"s3://{S3_BUCKET}/{PROCESSED_DATASET_PREFIX}/"
+Q1_MERGED_PATH = f"s3://{S3_BUCKET}/{Q1_MERGED_PREFIX}/"
+Q1_AGGREGATED_PATH = f"s3://{S3_BUCKET}/{Q1_AGGREGATED_PREFIX}/"
+
 Q2_FEATURES_PATH = f"s3://{S3_BUCKET}/{Q2_FEATURES_PREFIX}/"
 Q2_EVAL_PATH = f"s3://{S3_BUCKET}/{Q2_EVAL_PREFIX}/"
 Q2_PREDICTIONS_PATH = f"s3://{S3_BUCKET}/{Q2_PREDICTIONS_PREFIX}/"
@@ -54,35 +69,57 @@ glue_client = boto3.client("glue", region_name=REGION)
 s3_client = boto3.client("s3", region_name=REGION)
 
 
-def find_local_script(script_name: str) -> str:
+def find_local_scripts_asset(asset_name: str) -> str:
     dag_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join("/opt/airflow/scripts", script_name),
-        os.path.join(dag_dir, "..", "..", "scripts", script_name),
-        os.path.join("/home/ec2-user/big-data-project/scripts", script_name),
+        os.path.join("/opt/airflow/scripts", asset_name),
+        os.path.join(dag_dir, "..", "..", "scripts", asset_name),
+        os.path.join("/home/ec2-user/big-data-project/scripts", asset_name),
     ]
-    local_script = next((path for path in candidates if os.path.exists(path)), None)
-    if local_script is None:
-        raise FileNotFoundError(f"{script_name} not found in any of: {candidates}")
-    return local_script
+    local_asset = next((path for path in candidates if os.path.exists(path)), None)
+    if local_asset is None:
+        raise FileNotFoundError(f"{asset_name} not found in any of: {candidates}")
+    return local_asset
 
 
-def upload_script(script_name: str, s3_key: str) -> str:
-    local_script = find_local_script(script_name)
-    s3_client.upload_file(local_script, S3_BUCKET, s3_key)
-    script_s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
-    print(f"Uploaded {local_script} to {script_s3_uri}")
-    return script_s3_uri
+def upload_local_asset(asset_name: str, s3_key: str) -> None:
+    local_asset = find_local_scripts_asset(asset_name)
+    s3_client.upload_file(local_asset, S3_BUCKET, s3_key)
+    print(f"Uploaded {local_asset} to s3://{S3_BUCKET}/{s3_key}")
 
 
-def upload_ingest_script() -> str:
-    return upload_script("ingest.py", INGEST_SCRIPT_KEY)
+def upload_ingest_script() -> None:
+    upload_local_asset("ingest.py", SCRIPT_KEY)
+
+
+def upload_merge_script() -> None:
+    upload_local_asset("merge.py", MERGE_SCRIPT_KEY)
+
+
+def upload_aggregate_script() -> None:
+    upload_local_asset("aggregate.py", AGGREGATE_SCRIPT_KEY)
+
+
+def upload_holiday_reference() -> None:
+    upload_local_asset("holiday_reference.csv", HOLIDAY_REFERENCE_KEY)
+
+
+def upload_q2_build_features_script() -> None:
+    upload_local_asset("q2_build_features.py", Q2_BUILD_FEATURES_KEY)
+
+
+def upload_q2_train_model_script() -> None:
+    upload_local_asset("q2_train_model.py", Q2_TRAIN_MODEL_KEY)
+
+
+def upload_q2_batch_inference_script() -> None:
+    upload_local_asset("q2_batch_inference.py", Q2_BATCH_INFERENCE_KEY)
 
 
 def upload_q2_scripts() -> None:
-    upload_script("q2_build_features.py", Q2_BUILD_FEATURES_KEY)
-    upload_script("q2_train_model.py", Q2_TRAIN_MODEL_KEY)
-    upload_script("q2_batch_inference.py", Q2_BATCH_INFERENCE_KEY)
+    upload_q2_build_features_script()
+    upload_q2_train_model_script()
+    upload_q2_batch_inference_script()
 
 
 def create_emr_cluster() -> str:
@@ -147,42 +184,142 @@ def wait_for_cluster(cluster_id: str) -> bool:
         time.sleep(30)
 
 
-def submit_spark_step(
+def submit_spark_script_step(
     cluster_id: str,
     step_name: str,
     script_s3_uri: str,
-    script_args: list[str] | None = None,
+    script_args: Sequence[str],
 ) -> str:
-    args = [
-        "spark-submit",
-        "--deploy-mode",
-        "cluster",
-        script_s3_uri,
-    ]
-    if script_args:
-        args.extend(script_args)
-
     step = {
         "Name": step_name,
         "ActionOnFailure": "CONTINUE",
         "HadoopJarStep": {
             "Jar": "command-runner.jar",
-            "Args": args,
+            "Args": [
+                "spark-submit",
+                "--deploy-mode",
+                "cluster",
+                script_s3_uri,
+                *script_args,
+            ],
         },
     }
 
     response = emr_client.add_job_flow_steps(JobFlowId=cluster_id, Steps=[step])
     step_id = response["StepIds"][0]
-    print(f"Submitted step {step_id} ({step_name}) to cluster {cluster_id}")
+    print(f"Submitted step {step_id} to cluster {cluster_id}")
     return step_id
 
 
-def submit_ingest_spark_step(cluster_id: str) -> str:
-    return submit_spark_step(
+def submit_spark_step(cluster_id: str) -> str:
+    return submit_spark_script_step(
         cluster_id=cluster_id,
         step_name="Airline-Ingest-PySpark-Step",
-        script_s3_uri=INGEST_SCRIPT_S3_URI,
+        script_s3_uri=SCRIPT_S3_URI,
         script_args=[RAW_DATASET_PATH, PROCESSED_DATASET_PATH],
+    )
+
+
+def submit_merge_spark_step(
+    cluster_id: str,
+    days_before: int = 7,
+    days_after: int = 7,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Airline-Holiday-Merge-PySpark-Step",
+        script_s3_uri=MERGE_SCRIPT_S3_URI,
+        script_args=[
+            PROCESSED_DATASET_PATH,
+            HOLIDAY_REFERENCE_S3_URI,
+            Q1_MERGED_PATH,
+            "--days-before",
+            str(days_before),
+            "--days-after",
+            str(days_after),
+        ],
+    )
+
+
+def submit_aggregate_spark_step(
+    cluster_id: str,
+    delay_threshold: int = 15,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Airline-Holiday-Aggregate-PySpark-Step",
+        script_s3_uri=AGGREGATE_SCRIPT_S3_URI,
+        script_args=[
+            Q1_MERGED_PATH,
+            Q1_AGGREGATED_PATH,
+            "--delay-threshold",
+            str(delay_threshold),
+        ],
+    )
+
+
+def submit_q2_build_features_step(
+    cluster_id: str,
+    output_path: str,
+    model_version: str,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Q2-Build-Features-PySpark-Step",
+        script_s3_uri=Q2_BUILD_FEATURES_S3_URI,
+        script_args=[
+            PROCESSED_DATASET_PATH,
+            output_path,
+            "--model-version",
+            model_version,
+        ],
+    )
+
+
+def submit_q2_train_model_step(
+    cluster_id: str,
+    input_path: str,
+    model_path: str,
+    metrics_path: str,
+    evaluation_output_path: str,
+    train_ratio: float = 0.80,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Q2-Train-Model-PySpark-Step",
+        script_s3_uri=Q2_TRAIN_MODEL_S3_URI,
+        script_args=[
+            input_path,
+            model_path,
+            metrics_path,
+            evaluation_output_path,
+            "--train-ratio",
+            str(train_ratio),
+        ],
+    )
+
+
+def submit_q2_batch_inference_step(
+    cluster_id: str,
+    input_path: str,
+    model_path: str,
+    output_path: str,
+    model_version: str,
+    inference_batch_id: str,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Q2-Batch-Inference-PySpark-Step",
+        script_s3_uri=Q2_BATCH_INFERENCE_S3_URI,
+        script_args=[
+            input_path,
+            model_path,
+            output_path,
+            "--model-version",
+            model_version,
+            "--inference-batch-id",
+            inference_batch_id,
+        ],
     )
 
 

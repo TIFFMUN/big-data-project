@@ -63,6 +63,69 @@ aws ce get-cost-and-usage \
   --output table 2>/dev/null \
   || echo -e "  ${YELLOW}Not available yet${NC}"
 
+# ── S3 Storage Costs ─────────────────────────────────────────────────────
+echo ""
+echo -e "${CYAN}S3 Storage (data retained):${NC}"
+
+# Get bucket name from terraform output or environment
+BUCKET_NAME=$(cd "$PROJECT_DIR/terraform" && terraform output -raw s3_bucket_name 2>/dev/null || echo "")
+
+if [ -z "$BUCKET_NAME" ]; then
+  # Try to find bucket by tag
+  BUCKET_NAME=$(aws s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null | tr '\t' '\n' | grep -i bigdata | head -1 || echo "")
+fi
+
+if [ -n "$BUCKET_NAME" ]; then
+  echo "  Bucket: $BUCKET_NAME"
+
+  # Calculate total size using CloudWatch metrics (more accurate)
+  BUCKET_SIZE_BYTES=$(aws cloudwatch get-metric-statistics \
+    --namespace AWS/S3 \
+    --metric-name BucketSizeBytes \
+    --dimensions Name=BucketName,Value="$BUCKET_NAME" Name=StorageType,Value=StandardStorage \
+    --start-time "$(date -u -v-2d +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%S)" \
+    --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+    --period 86400 \
+    --statistics Average \
+    --query 'Datapoints[-1].Average' \
+    --output text 2>/dev/null)
+
+  if [ "$BUCKET_SIZE_BYTES" != "None" ] && [ -n "$BUCKET_SIZE_BYTES" ] && [ "$BUCKET_SIZE_BYTES" != "null" ]; then
+    # Convert bytes to GB
+    SIZE_GB=$(echo "scale=2; $BUCKET_SIZE_BYTES / 1024 / 1024 / 1024" | bc)
+    COST_MONTH=$(echo "scale=2; $SIZE_GB * 0.023" | bc)
+
+    echo -e "  📦 Size: ${BOLD}${SIZE_GB} GB${NC}"
+    echo -e "  💰 Estimated cost: ${GREEN}\$${COST_MONTH}/month${NC} (at \$0.023/GB)"
+  else
+    # Fallback: use S3 API to calculate (slower but works immediately)
+    echo "  Calculating bucket size..."
+    TOTAL_SIZE=$(aws s3 ls s3://"$BUCKET_NAME" --recursive --summarize 2>/dev/null | grep "Total Size" | awk '{print $3}')
+
+    if [ -n "$TOTAL_SIZE" ] && [ "$TOTAL_SIZE" -gt 0 ] 2>/dev/null; then
+      SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc)
+      COST_MONTH=$(echo "scale=2; $SIZE_GB * 0.023" | bc)
+
+      echo -e "  📦 Size: ${BOLD}${SIZE_GB} GB${NC}"
+      echo -e "  💰 Estimated cost: ${GREEN}\$${COST_MONTH}/month${NC} (at \$0.023/GB)"
+    else
+      echo -e "  ${YELLOW}Bucket is empty or data not available yet${NC}"
+    fi
+  fi
+
+  # Show object count by prefix
+  echo ""
+  echo "  Objects by prefix:"
+  for prefix in "raw" "processed" "scripts" "athena-results" "emr-logs"; do
+    COUNT=$(aws s3 ls s3://"$BUCKET_NAME"/"$prefix"/ --recursive 2>/dev/null | wc -l | xargs)
+    if [ "$COUNT" -gt 0 ] 2>/dev/null; then
+      echo "    /$prefix/: $COUNT files"
+    fi
+  done
+else
+  echo -e "  ${YELLOW}No bucket found${NC}"
+fi
+
 # ── Running EC2 instances ────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}Running EC2 instances (costing you right now):${NC}"

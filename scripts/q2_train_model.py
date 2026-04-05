@@ -1,15 +1,5 @@
 """
 Train the Q2 Spark ML model for expected in-air delay.
-
-Model choice:
-    GBTRegressor over a tabular feature set, trained entirely on EMR Spark.
-
-Usage:
-    spark-submit q2_train_model.py \
-        s3://bucket/processed/q2_features/model_version=.../ \
-        s3://bucket/models/q2_in_air_delay/model_version=.../model \
-        s3://bucket/models/q2_in_air_delay/model_version=.../metrics/metrics.json \
-        s3://bucket/processed/q2_model_eval/model_version=.../
 """
 
 import argparse
@@ -26,12 +16,7 @@ from pyspark.ml.regression import GBTRegressor
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-
-CATEGORICAL_COLUMNS = [
-    "unique_carrier",
-    "origin",
-    "dest",
-]
+CATEGORICAL_COLUMNS = ["unique_carrier", "origin", "dest"]
 
 NUMERIC_COLUMNS = [
     "distance",
@@ -65,21 +50,12 @@ NUMERIC_COLUMNS = [
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the Q2 Spark ML model.")
-    parser.add_argument("input_path", help="Input feature parquet path")
-    parser.add_argument("model_path", help="Output model path")
-    parser.add_argument("metrics_path", help="S3 JSON path for evaluation metrics")
-    parser.add_argument("evaluation_output_path", help="Parquet path for holdout predictions")
-    parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=0.80,
-        help="Time-based train split ratio",
-    )
-    parser.add_argument(
-        "--app-name",
-        default="BigDataProject-Q2TrainModel",
-        help="Spark application name",
-    )
+    parser.add_argument("input_path")
+    parser.add_argument("model_path")
+    parser.add_argument("metrics_path")
+    parser.add_argument("evaluation_output_path")
+    parser.add_argument("--train-ratio", type=float, default=0.80)
+    parser.add_argument("--app-name", default="BigDataProject-Q2TrainModel")
     return parser.parse_args(argv)
 
 
@@ -92,11 +68,7 @@ def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
 
 def build_pipeline():
     indexers = [
-        StringIndexer(
-            inputCol=column_name,
-            outputCol=f"{column_name}_idx",
-            handleInvalid="keep",
-        )
+        StringIndexer(inputCol=column_name, outputCol=f"{column_name}_idx", handleInvalid="keep")
         for column_name in CATEGORICAL_COLUMNS
     ]
 
@@ -144,11 +116,7 @@ def compute_metrics(predictions):
         metricName="r2",
     ).evaluate(predictions)
 
-    return {
-        "rmse": rmse,
-        "mae": mae,
-        "r2": r2,
-    }
+    return {"rmse": rmse, "mae": mae, "r2": r2}
 
 
 def main(argv: Sequence[str]) -> int:
@@ -158,7 +126,6 @@ def main(argv: Sequence[str]) -> int:
 
     try:
         df = spark.read.parquet(args.input_path)
-
         required_columns = CATEGORICAL_COLUMNS + NUMERIC_COLUMNS + [
             "flight_air_time_delay",
             "scheduled_arr_ts_unix",
@@ -185,20 +152,12 @@ def main(argv: Sequence[str]) -> int:
         if modelling_df.rdd.isEmpty():
             raise ValueError("No rows available for Q2 model training after filtering.")
 
-        split_cutoff = modelling_df.approxQuantile(
-            "scheduled_arr_ts_unix",
-            [args.train_ratio],
-            0.01,
-        )[0]
-
+        split_cutoff = modelling_df.approxQuantile("scheduled_arr_ts_unix", [args.train_ratio], 0.01)[0]
         train_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") <= F.lit(split_cutoff))
         test_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") > F.lit(split_cutoff))
 
         if train_df.rdd.isEmpty() or test_df.rdd.isEmpty():
-            raise ValueError(
-                "Time-based split produced an empty train or test set. "
-                "Check feature generation and train_ratio."
-            )
+            raise ValueError("Time-based split produced an empty train or test set.")
 
         pipeline = build_pipeline()
         model = pipeline.fit(train_df)
@@ -228,14 +187,8 @@ def main(argv: Sequence[str]) -> int:
                 F.col("flight_air_time_delay").alias("actual_in_air_delay"),
                 F.col("prediction").alias("predicted_in_air_delay"),
             )
-            .withColumn(
-                "absolute_error",
-                F.abs(F.col("actual_in_air_delay") - F.col("predicted_in_air_delay")),
-            )
-            .withColumn(
-                "squared_error",
-                F.pow(F.col("actual_in_air_delay") - F.col("predicted_in_air_delay"), 2),
-            )
+            .withColumn("absolute_error", F.abs(F.col("actual_in_air_delay") - F.col("predicted_in_air_delay")))
+            .withColumn("squared_error", F.pow(F.col("actual_in_air_delay") - F.col("predicted_in_air_delay"), 2))
         )
 
         (
@@ -253,11 +206,7 @@ def main(argv: Sequence[str]) -> int:
             ContentType="application/json",
         )
 
-        print("Training complete.")
         print(json.dumps(metrics, indent=2))
-        print(f"Saved model to {args.model_path}")
-        print(f"Saved metrics to {args.metrics_path}")
-        print(f"Saved holdout predictions to {args.evaluation_output_path}")
     finally:
         spark.stop()
 

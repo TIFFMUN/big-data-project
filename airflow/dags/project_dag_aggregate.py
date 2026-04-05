@@ -1,61 +1,69 @@
 """
-Ingest DAG for the airline dataset.
+Aggregate DAG for the Question 1 airport holiday mart stage.
 
 Flow:
-1. Optionally land raw source files from Kaggle into S3 if the raw prefix is empty.
-2. Upload the PySpark ingest script to S3 /scripts/
-3. Create an EMR cluster or reuse one passed in via dag_run.conf.
-4. Submit the Spark ingest step to EMR.
-5. Wait for the step to complete.
-6. Terminate the EMR cluster when this DAG owns the cluster lifecycle.
+1. Upload the PySpark aggregate script to S3 /scripts/
+2. Create an EMR cluster or reuse one passed in via dag_run.conf.
+3. Submit the Spark aggregate step to EMR.
+4. Wait for the step to complete.
+5. Terminate the EMR cluster when this DAG owns the cluster lifecycle.
 """
 
 from datetime import datetime, timedelta
-from pathlib import Path
-import sys
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.trigger_rule import TriggerRule
 
-from dag_utils import get_external_cluster_id, get_manage_cluster
 from emr_config import (
-    REGION,
-    RAW_DATASET_PREFIX,
-    S3_BUCKET,
     create_emr_cluster,
-    submit_spark_step,
+    submit_aggregate_spark_step,
     terminate_emr_cluster,
-    upload_ingest_script,
+    upload_aggregate_script,
     wait_for_cluster,
     wait_for_step,
 )
 
 
-def add_scripts_dir_to_path() -> None:
-    candidate_dirs = [
-        Path("/opt/airflow/scripts"),
-        Path(__file__).resolve().parents[2] / "scripts",
-    ]
-    for candidate_dir in candidate_dirs:
-        if candidate_dir.exists() and str(candidate_dir) not in sys.path:
-            sys.path.insert(0, str(candidate_dir))
+DEFAULT_DELAY_THRESHOLD = 15
 
 
-add_scripts_dir_to_path()
-from load_kaggle_raw_to_s3 import download_kaggle_to_s3_raw  # noqa: E402
+def get_dag_run_conf(context) -> dict:
+    dag_run = context.get("dag_run")
+    if dag_run is None or dag_run.conf is None:
+        return {}
+    return dict(dag_run.conf)
 
 
-def task_land_raw_dataset(**context):
-    download_kaggle_to_s3_raw(
-        bucket=S3_BUCKET,
-        region=REGION,
-        raw_prefix=RAW_DATASET_PREFIX,
-    )
+def parse_manage_cluster(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no"}:
+            return False
+        if normalized in {"true", "1", "yes"}:
+            return True
+    return bool(value)
 
 
-def task_upload_ingest_script(**context):
-    upload_ingest_script()
+def get_manage_cluster(context) -> bool:
+    conf = get_dag_run_conf(context)
+    return parse_manage_cluster(conf.get("manage_cluster", True))
+
+
+def get_external_cluster_id(context) -> str | None:
+    conf = get_dag_run_conf(context)
+    cluster_id = conf.get("cluster_id")
+    if cluster_id is None:
+        return None
+    cluster_id = str(cluster_id).strip()
+    return cluster_id or None
+
+
+def task_upload_aggregate_script(**context):
+    upload_aggregate_script()
 
 
 def task_create_emr_cluster(**context):
@@ -76,7 +84,10 @@ def task_create_emr_cluster(**context):
 
 def task_wait_for_cluster_ready(**context):
     if not get_manage_cluster(context):
-        cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
+        cluster_id = context["ti"].xcom_pull(
+            task_ids="create_emr_cluster",
+            key="cluster_id",
+        )
         print(
             f"Cluster lifecycle is managed by the parent DAG; "
             f"skipping local readiness wait for {cluster_id}."
@@ -87,37 +98,42 @@ def task_wait_for_cluster_ready(**context):
     return wait_for_cluster(cluster_id)
 
 
-def task_submit_spark_step(**context):
+def task_submit_aggregate_spark_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     if not cluster_id:
-        raise ValueError("EMR cluster_id was not found for submit_spark_step.")
-    step_id = submit_spark_step(cluster_id)
+        raise ValueError("EMR cluster_id was not found for submit_aggregate_spark_step.")
+
+    step_id = submit_aggregate_spark_step(
+        cluster_id=cluster_id,
+        delay_threshold=DEFAULT_DELAY_THRESHOLD,
+    )
     context["ti"].xcom_push(key="step_id", value=step_id)
     return step_id
 
 
 def task_wait_for_step_completion(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
-    step_id = context["ti"].xcom_pull(task_ids="submit_spark_step", key="step_id")
+    step_id = context["ti"].xcom_pull(
+        task_ids="submit_aggregate_spark_step",
+        key="step_id",
+    )
     return wait_for_step(cluster_id, step_id)
 
 
 def task_terminate_emr_cluster(**context):
-    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
-    if not cluster_id:
-        print("No EMR cluster_id found; skipping termination.")
-        return
-
     if not get_manage_cluster(context):
+        cluster_id = context["ti"].xcom_pull(
+            task_ids="create_emr_cluster",
+            key="cluster_id",
+        )
         print(
             f"Cluster lifecycle is managed by the parent DAG; "
             f"skipping local termination for {cluster_id}."
         )
         return
 
+    cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     terminate_emr_cluster(cluster_id)
-
-
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -127,22 +143,17 @@ default_args = {
 }
 
 with DAG(
-    dag_id="project_dag_ingest",
+    dag_id="project_dag_aggregate",
     default_args=default_args,
-    description="Land raw Kaggle data when needed and run the PySpark ingest job",
+    description="Run the Question 1 aggregate holiday mart job on EMR",
     schedule_interval=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["big-data", "ingest", "kaggle", "emr", "pyspark"],
+    tags=["big-data", "aggregate", "holiday", "emr", "pyspark"],
 ) as dag:
-    t_land_raw = PythonOperator(
-        task_id="land_raw_dataset",
-        python_callable=task_land_raw_dataset,
-    )
-
-    t_upload = PythonOperator(
-        task_id="upload_ingest_script",
-        python_callable=task_upload_ingest_script,
+    t_upload_aggregate_script = PythonOperator(
+        task_id="upload_aggregate_script",
+        python_callable=task_upload_aggregate_script,
     )
 
     t_create = PythonOperator(
@@ -156,8 +167,8 @@ with DAG(
     )
 
     t_submit = PythonOperator(
-        task_id="submit_spark_step",
-        python_callable=task_submit_spark_step,
+        task_id="submit_aggregate_spark_step",
+        python_callable=task_submit_aggregate_spark_step,
     )
 
     t_wait_step = PythonOperator(
@@ -168,12 +179,10 @@ with DAG(
     t_terminate = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
-        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     (
-        t_land_raw
-        >> t_upload
+        t_upload_aggregate_script
         >> t_create
         >> t_wait_cluster
         >> t_submit

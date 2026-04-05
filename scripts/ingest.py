@@ -123,6 +123,8 @@ TIME_COLUMNS = (
     "crs_arr_time",
     "arr_time",
 )
+MIN_FLIGHT_YEAR = 1900
+MAX_FLIGHT_YEAR = 2100
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -245,17 +247,32 @@ def add_time_features(df: DataFrame) -> DataFrame:
     return df
 
 
+def is_reasonable_flight_date_expr():
+    return F.coalesce(
+        F.col("year").between(MIN_FLIGHT_YEAR, MAX_FLIGHT_YEAR)
+        & F.col("month").between(1, 12)
+        & F.col("day_of_month").between(1, 31),
+        F.lit(False),
+    )
+
+
 def add_flight_level_features(df: DataFrame) -> DataFrame:
+    has_reasonable_flight_date_parts = is_reasonable_flight_date_expr()
+    candidate_flight_date = F.to_date(
+        F.format_string(
+            "%04d-%02d-%02d",
+            F.col("year"),
+            F.col("month"),
+            F.col("day_of_month"),
+        )
+    )
     df = df.withColumn(
         "flight_date",
-        F.to_date(
-            F.format_string(
-                "%04d-%02d-%02d",
-                F.col("year"),
-                F.col("month"),
-                F.col("day_of_month"),
-            )
-        ),
+        F.when(has_reasonable_flight_date_parts, candidate_flight_date),
+    )
+    df = df.withColumn(
+        "has_reasonable_flight_date_parts",
+        has_reasonable_flight_date_parts,
     )
     df = df.withColumn("has_valid_flight_date", F.col("flight_date").isNotNull())
     df = df.withColumn(
@@ -352,10 +369,10 @@ def list_input_files(spark: SparkSession, input_path: str) -> List[str]:
         name = file_status.getPath().getName()
         path_string = file_status.getPath().toString()
         lower_name = name.lower()
-        if not (lower_name.endswith(".csv") or lower_name.endswith(".csv.shuffle")):
+        if not lower_name.endswith(".csv.shuffle"):
             continue
         data_files.append(path_string)
-        if re.fullmatch(r"(19|20)\d{2}\.csv(?:\.shuffle)?", lower_name):
+        if re.fullmatch(r"(19|20)\d{2}\.csv\.shuffle", lower_name):
             yearly_data_files.append(path_string)
 
     if not data_files:
@@ -380,6 +397,13 @@ def write_processed_data(df: DataFrame, output_path: str) -> None:
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     spark = SparkSession.builder.appName(args.app_name).getOrCreate()
+    # Preserve Spark 2 / legacy Parquet compatibility when writing historical
+    # date/timestamp values. Using LEGACY avoids Spark upgrade-era rebase issues
+    # (including SparkUpgradeException for pre-1582 dates / legacy INT96 data)
+    # and keeps output consistent with existing downstream readers; CORRECTED
+    # would change persisted semantics and is not the intended behavior here.
+    spark.conf.set("spark.sql.parquet.datetimeRebaseModeInWrite", "LEGACY")
+    spark.conf.set("spark.sql.parquet.int96RebaseModeInWrite", "LEGACY")
 
     try:
         input_files = list_input_files(spark, args.input_path)

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, tiff-branch]
+    branches: [main, tiff-branch, gabr-branch]
   pull_request:
     branches: [main]
 

@@ -3,18 +3,6 @@ Build the Q2 feature dataset used to answer:
 
 "Given delays of flights arriving at the destination airport and the airport's
 current congestion, what is the expected in-air delay for a flight before it lands?"
-
-Input:
-    curated airline parquet from scripts/ingest.py
-
-Output:
-    Parquet dataset of flight-level features and regression target
-
-Usage:
-    spark-submit q2_build_features.py \
-        s3://bucket/processed/airline_data/ \
-        s3://bucket/processed/q2_features/model_version=.../ \
-        --model-version 20240401T010101
 """
 
 import argparse
@@ -23,7 +11,6 @@ from typing import Sequence
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql import types as T
 from pyspark.sql.window import Window
 
 
@@ -31,22 +18,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build Q2 feature dataset.")
     parser.add_argument("input_path", help="Curated input parquet path")
     parser.add_argument("output_path", help="Output parquet path for Q2 features")
-    parser.add_argument(
-        "--model-version",
-        default="manual",
-        help="Model version label written into the dataset",
-    )
-    parser.add_argument(
-        "--app-name",
-        default="BigDataProject-Q2BuildFeatures",
-        help="Spark application name",
-    )
+    parser.add_argument("--model-version", default="manual")
+    parser.add_argument("--app-name", default="BigDataProject-Q2BuildFeatures")
     return parser.parse_args(argv)
 
 
 def add_timestamp_columns(df):
-    dep_day_offset = F.lit(0)
-
     arr_day_offset = F.when(
         F.col("crs_arr_time_minutes").isNull() | F.col("crs_dep_time_minutes").isNull(),
         F.lit(0),
@@ -72,10 +49,7 @@ def add_timestamp_columns(df):
         ),
     )
 
-    df = df.withColumn(
-        "scheduled_arr_local_date",
-        F.date_add(F.col("flight_date"), arr_day_offset),
-    )
+    df = df.withColumn("scheduled_arr_local_date", F.date_add(F.col("flight_date"), arr_day_offset))
 
     df = df.withColumn(
         "scheduled_arr_ts",
@@ -94,11 +68,12 @@ def add_timestamp_columns(df):
         ),
     )
 
-    df = df.withColumn("scheduled_dep_day_offset", dep_day_offset.cast("int"))
-    df = df.withColumn("scheduled_arr_day_offset", arr_day_offset.cast("int"))
-    df = df.withColumn("scheduled_dep_ts_unix", F.unix_timestamp("scheduled_dep_ts"))
-    df = df.withColumn("scheduled_arr_ts_unix", F.unix_timestamp("scheduled_arr_ts"))
-    return df
+    return (
+        df.withColumn("scheduled_arr_day_offset", arr_day_offset.cast("int"))
+        .withColumn("scheduled_dep_day_offset", F.lit(0).cast("int"))
+        .withColumn("scheduled_dep_ts_unix", F.unix_timestamp("scheduled_dep_ts"))
+        .withColumn("scheduled_arr_ts_unix", F.unix_timestamp("scheduled_arr_ts"))
+    )
 
 
 def build_features(df, model_version: str):
@@ -121,8 +96,7 @@ def build_features(df, model_version: str):
     )
 
     filtered = add_timestamp_columns(filtered)
-    filtered = filtered.filter(F.col("scheduled_arr_ts").isNotNull())
-    filtered = filtered.filter(F.col("scheduled_dep_ts").isNotNull())
+    filtered = filtered.filter(F.col("scheduled_arr_ts").isNotNull()).filter(F.col("scheduled_dep_ts").isNotNull())
 
     filtered = filtered.withColumn(
         "flight_air_time_delay",
@@ -137,8 +111,7 @@ def build_features(df, model_version: str):
     filtered = filtered.withColumn(
         "arr_delay_over_15_flag",
         F.when(F.col("arr_delay") > 15, F.lit(1.0)).otherwise(F.lit(0.0)),
-    )
-    filtered = filtered.withColumn(
+    ).withColumn(
         "arr_delay_positive_flag",
         F.when(F.col("arr_delay") > 0, F.lit(1.0)).otherwise(F.lit(0.0)),
     )
@@ -206,7 +179,7 @@ def build_features(df, model_version: str):
         }
     )
 
-    output = (
+    return (
         enriched.withColumn("is_weekend_int", F.when(F.col("is_weekend"), F.lit(1)).otherwise(F.lit(0)))
         .withColumn("model_version", F.lit(model_version))
         .select(
@@ -260,8 +233,6 @@ def build_features(df, model_version: str):
         )
     )
 
-    return output
-
 
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
@@ -271,8 +242,6 @@ def main(argv: Sequence[str]) -> int:
     try:
         curated_df = spark.read.parquet(args.input_path)
         feature_df = build_features(curated_df, args.model_version)
-
-        feature_df.printSchema()
 
         (
             feature_df.write.mode("overwrite")
