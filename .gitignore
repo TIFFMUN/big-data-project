@@ -25,3 +25,9 @@ terraform/.terraform/
 terraform/*.tfstate*
 terraform/.terraform.lock.hcl
 
+# Airflow
+airflow/logs/
+
+# Claude Code
+.claude/
+
