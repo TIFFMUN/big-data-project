@@ -10,9 +10,16 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.sensors.python import PythonSensor
 from airflow.utils.trigger_rule import TriggerRule
 
-from emr_config import create_emr_cluster, terminate_emr_cluster, wait_for_cluster
+from emr_config import (
+    check_crawler_status,
+    create_emr_cluster,
+    terminate_emr_cluster,
+    trigger_glue_crawler,
+    wait_for_cluster,
+)
 
 
 def task_create_emr_cluster(**context):
@@ -32,6 +39,14 @@ def task_terminate_emr_cluster(**context):
         print("No EMR cluster_id found; skipping termination.")
         return
     terminate_emr_cluster(cluster_id)
+
+
+def task_trigger_glue_crawler(**context):
+    trigger_glue_crawler()
+
+
+def task_check_crawler_status(**context):
+    return check_crawler_status()
 
 
 default_args = {
@@ -82,6 +97,27 @@ with DAG(
         poke_interval=30,
     )
 
+    t_run_aggregate_pipeline = TriggerDagRunOperator(
+        task_id="run_aggregate_pipeline",
+        trigger_dag_id="project_dag_aggregate",
+        conf=shared_cluster_conf,
+        wait_for_completion=True,
+        poke_interval=30,
+    )
+
+    t_trigger_glue_crawler = PythonOperator(
+        task_id="trigger_glue_crawler",
+        python_callable=task_trigger_glue_crawler,
+    )
+
+    t_wait_for_crawler = PythonSensor(
+        task_id="wait_for_crawler",
+        python_callable=task_check_crawler_status,
+        poke_interval=30,
+        timeout=600,
+        mode="poke",
+    )
+
     t_terminate_emr_cluster = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
@@ -93,5 +129,8 @@ with DAG(
         >> t_wait_for_cluster_ready
         >> t_run_ingest_pipeline
         >> t_run_merge_pipeline
+        >> t_run_aggregate_pipeline
+        >> t_trigger_glue_crawler
+        >> t_wait_for_crawler
         >> t_terminate_emr_cluster
     )
