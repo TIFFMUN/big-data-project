@@ -104,24 +104,23 @@ def merge_with_holidays(
         F.monotonically_increasing_id(),
     )
 
+    days_from_holiday_expr = F.datediff(
+        F.col("f.flight_date"),
+        F.col("h.holiday_date"),
+    )
+
     joined = (
         flights_with_row_id.alias("f")
         .join(
             F.broadcast(holidays_df).alias("h"),
             F.col("f.flight_date").isNotNull()
-            & (
-                F.datediff(F.col("f.flight_date"), F.col("h.holiday_date"))
-                >= F.lit(-days_before)
-            )
-            & (
-                F.datediff(F.col("f.flight_date"), F.col("h.holiday_date"))
-                <= F.lit(days_after)
-            ),
+            & (days_from_holiday_expr >= F.lit(-days_before))
+            & (days_from_holiday_expr <= F.lit(days_after)),
             "left",
         )
         .withColumn(
             "days_from_holiday",
-            F.datediff(F.col("f.flight_date"), F.col("h.holiday_date")),
+            days_from_holiday_expr,
         )
     )
 
