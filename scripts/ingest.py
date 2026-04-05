@@ -168,6 +168,18 @@ def normalize_columns(df: DataFrame) -> DataFrame:
     return df.toDF(*normalized_names)
 
 
+def ensure_expected_columns(df: DataFrame) -> DataFrame:
+    expected_columns = {
+        KNOWN_COLUMN_RENAMES.get(column_name, to_snake_case(column_name))
+        for column_name in RAW_COLUMNS
+    }
+    missing_columns = sorted(expected_columns.difference(df.columns))
+    if missing_columns:
+        missing = ", ".join(missing_columns)
+        raise ValueError(f"Input data is missing expected columns: {missing}")
+    return df
+
+
 def trim_string_columns(df: DataFrame) -> DataFrame:
     for column_name in df.columns:
         df = df.withColumn(
@@ -275,6 +287,11 @@ def add_flight_level_features(df: DataFrame) -> DataFrame:
         has_reasonable_flight_date_parts,
     )
     df = df.withColumn("has_valid_flight_date", F.col("flight_date").isNotNull())
+    # Partition keys should come from the validated date, not the raw source
+    # fields, so malformed rows do not create garbage S3 partitions.
+    df = df.withColumn("year", F.year(F.col("flight_date")))
+    df = df.withColumn("month", F.month(F.col("flight_date")))
+    df = df.withColumn("day_of_month", F.dayofmonth(F.col("flight_date")))
     df = df.withColumn(
         "route_key",
         F.concat_ws("-", F.col("origin"), F.col("dest")),
@@ -338,6 +355,7 @@ def transform_airline_dataframe(df: DataFrame) -> DataFrame:
     transformed = trim_string_columns(df)
     transformed = drop_embedded_header_rows(transformed)
     transformed = normalize_columns(transformed)
+    transformed = ensure_expected_columns(transformed)
     transformed = transformed.dropna(how="all")
     transformed = uppercase_string_columns(transformed)
     transformed = cast_integer_columns(transformed)
@@ -408,9 +426,11 @@ def main(argv: Sequence[str]) -> int:
     try:
         input_files = list_input_files(spark, args.input_path)
         raw_df = (
-            spark.read.schema(raw_schema())
-            .option("header", "false")
+            # airline.csv.shuffle reorders the source columns, so we read by
+            # header name instead of relying on positional schema order.
+            spark.read.option("header", "true")
             .option("mode", "PERMISSIVE")
+            .option("inferSchema", "false")
             .csv(input_files)
         )
 
