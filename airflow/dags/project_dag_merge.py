@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.sensors.python import PythonSensor
 
 from dag_utils import (
     get_dag_run_conf,
@@ -23,9 +24,11 @@ from dag_utils import (
     parse_manage_cluster,
 )
 from emr_config import (
+    check_crawler_status,
     create_emr_cluster,
     submit_merge_spark_step,
     terminate_emr_cluster,
+    trigger_glue_crawler,
     upload_holiday_reference,
     upload_merge_script,
     wait_for_cluster,
@@ -111,6 +114,13 @@ def task_terminate_emr_cluster(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     terminate_emr_cluster(cluster_id)
 
+def task_trigger_glue_crawler(**context):
+    trigger_glue_crawler()
+
+
+def task_check_crawler_status(**context):
+    return check_crawler_status()
+
 
 default_args = {
     "owner": "airflow",
@@ -165,6 +175,19 @@ with DAG(
         trigger_rule=TriggerRule.ALL_DONE,
     )
 
+    t_crawl = PythonOperator(
+        task_id="trigger_glue_crawler",
+        python_callable=task_trigger_glue_crawler,
+    )
+
+    t_crawl_wait = PythonSensor(
+        task_id="wait_for_crawler",
+        python_callable=task_check_crawler_status,
+        poke_interval=30,
+        timeout=600,
+        mode="poke",
+    )
+
     (
         t_upload_holiday_reference
         >> t_upload_merge_script
@@ -172,5 +195,7 @@ with DAG(
         >> t_wait_cluster
         >> t_submit
         >> t_wait_step
+        >> t_crawl
+        >> t_crawl_wait
         >> t_terminate
     )
