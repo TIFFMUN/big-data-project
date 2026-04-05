@@ -25,7 +25,7 @@ resource "aws_security_group" "emr_master" {
   }
 
   tags = merge(var.tags, {
-    Name = "${var.project}-emr-master-sg"
+    Name                                       = "${var.project}-emr-master-sg"
     "for-use-with-amazon-emr-managed-policies" = "true"
   })
 }
@@ -61,7 +61,7 @@ resource "aws_security_group" "emr_core" {
   }
 
   tags = merge(var.tags, {
-    Name = "${var.project}-emr-core-sg"
+    Name                                       = "${var.project}-emr-core-sg"
     "for-use-with-amazon-emr-managed-policies" = "true"
   })
 }

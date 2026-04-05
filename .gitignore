@@ -16,11 +16,18 @@ __pycache__/
 
 
 # Environment files with credentials
-.env
+terraform/.env
+airflow/.env
 !*.env.example
 
 # Terraform (handled by terraform/.gitignore too)
 terraform/.terraform/
 terraform/*.tfstate*
 terraform/.terraform.lock.hcl
+
+# Airflow
+airflow/logs/
+
+# Claude Code
+.claude/
 
