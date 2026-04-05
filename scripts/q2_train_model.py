@@ -152,12 +152,22 @@ def main(argv: Sequence[str]) -> int:
         if modelling_df.rdd.isEmpty():
             raise ValueError("No rows available for Q2 model training after filtering.")
 
+        # split_cutoff = modelling_df.approxQuantile("scheduled_arr_ts_unix", [args.train_ratio], 0.01)[0]
+        # train_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") <= F.lit(split_cutoff))
+        # test_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") > F.lit(split_cutoff))
+
+        # if train_df.rdd.isEmpty() or test_df.rdd.isEmpty():
+        #     raise ValueError("Time-based split produced an empty train or test set.")
+
         split_cutoff = modelling_df.approxQuantile("scheduled_arr_ts_unix", [args.train_ratio], 0.01)[0]
         train_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") <= F.lit(split_cutoff))
         test_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") > F.lit(split_cutoff))
 
         if train_df.rdd.isEmpty() or test_df.rdd.isEmpty():
-            raise ValueError("Time-based split produced an empty train or test set.")
+            train_df, test_df = modelling_df.randomSplit([args.train_ratio, 1 - args.train_ratio], seed=42)
+
+        if train_df.rdd.isEmpty() or test_df.rdd.isEmpty():
+            raise ValueError("Unable to create non-empty train and test sets.")
 
         pipeline = build_pipeline()
         model = pipeline.fit(train_df)
@@ -214,4 +224,9 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise
