@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, tiff-branch]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install flake8
+          pip install -r airflow/requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          # Stop on syntax errors or undefined names
+          flake8 airflow/dags scripts --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Warn on complexity and style (but don't fail)
+          flake8 airflow/dags scripts --count --max-complexity=10 --max-line-length=127 --statistics || true
+
+  airflow-dag-validation:
+    name: Validate Airflow DAGs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Airflow dependencies
+        run: pip install -r airflow/requirements.txt
+
+      - name: Test DAG imports
+        run: |
+          python -c "
+          import sys
+          sys.path.insert(0, 'airflow/dags')
+          try:
+              import project_dag_main
+              import project_dag_ingest
+              import emr_config
+              print('✓ All DAGs imported successfully')
+          except Exception as e:
+              print(f'✗ DAG import failed: {e}')
+              sys.exit(1)
+          "
+
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate

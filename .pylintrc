@@ -1,0 +1,22 @@
+[MASTER]
+max-line-length=127
+disable=
+    C0111,  # missing-docstring
+    C0103,  # invalid-name
+    R0913,  # too-many-arguments
+    R0914,  # too-many-locals
+    W0703,  # broad-except (common in Airflow)
+
+[MESSAGES CONTROL]
+# Only focus on critical issues
+enable=
+    E,  # errors
+    F,  # fatal
+
+[REPORTS]
+output-format=text
+reports=no
+
+[DESIGN]
+max-args=10
+max-locals=20
