@@ -23,7 +23,9 @@ from emr_config import (
     REGION,
     RAW_DATASET_PREFIX,
     S3_BUCKET,
+    build_ingest_metrics_path,
     create_emr_cluster,
+    log_metrics_from_s3_prefix,
     submit_spark_step,
     terminate_emr_cluster,
     upload_ingest_script,
@@ -91,8 +93,13 @@ def task_submit_spark_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     if not cluster_id:
         raise ValueError("EMR cluster_id was not found for submit_spark_step.")
-    step_id = submit_spark_step(cluster_id)
+    metrics_output_path = build_ingest_metrics_path(context["run_id"])
+    step_id = submit_spark_step(
+        cluster_id,
+        metrics_output_path=metrics_output_path,
+    )
     context["ti"].xcom_push(key="step_id", value=step_id)
+    context["ti"].xcom_push(key="metrics_output_path", value=metrics_output_path)
     return step_id
 
 
@@ -100,6 +107,17 @@ def task_wait_for_step_completion(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     step_id = context["ti"].xcom_pull(task_ids="submit_spark_step", key="step_id")
     return wait_for_step(cluster_id, step_id)
+
+
+def task_log_ingest_metrics(**context):
+    metrics_output_path = context["ti"].xcom_pull(
+        task_ids="submit_spark_step",
+        key="metrics_output_path",
+    )
+    if not metrics_output_path:
+        print("No metrics output path found; skipping ingest metrics logging.")
+        return
+    return log_metrics_from_s3_prefix(metrics_output_path)
 
 
 def task_terminate_emr_cluster(**context):
@@ -165,6 +183,11 @@ with DAG(
         python_callable=task_wait_for_step_completion,
     )
 
+    t_log_metrics = PythonOperator(
+        task_id="log_ingest_metrics",
+        python_callable=task_log_ingest_metrics,
+    )
+
     t_terminate = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
@@ -178,5 +201,6 @@ with DAG(
         >> t_wait_cluster
         >> t_submit
         >> t_wait_step
+        >> t_log_metrics
         >> t_terminate
     )
