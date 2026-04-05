@@ -118,6 +118,13 @@ with DAG(
         mode="poke",
     )
 
+    t_run_athena_analysis = TriggerDagRunOperator(
+        task_id="run_athena_analysis",
+        trigger_dag_id="project_dag_athena",
+        wait_for_completion=True,
+        poke_interval=30,
+    )
+
     t_terminate_emr_cluster = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
@@ -132,5 +139,6 @@ with DAG(
         >> t_run_aggregate_pipeline
         >> t_trigger_glue_crawler
         >> t_wait_for_crawler
+        >> t_run_athena_analysis
         >> t_terminate_emr_cluster
     )
