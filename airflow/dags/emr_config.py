@@ -4,6 +4,7 @@ Shared Airflow configuration and helper functions for the current project DAGs.
 
 import os
 import time
+from typing import Sequence
 
 import boto3
 
@@ -24,37 +25,59 @@ GLUE_CRAWLER = "bigdata-project-processed-crawler"
 DATASET_SUBDIR = os.getenv("DATASET_SUBDIR", "airline_data")
 
 SCRIPT_KEY = join_s3_key("scripts", "ingest.py")
+MERGE_SCRIPT_KEY = join_s3_key("scripts", "merge.py")
+HOLIDAY_REFERENCE_KEY = join_s3_key("raw", "reference", "holiday_reference.csv")
 RAW_DATASET_PREFIX = join_s3_key("raw", DATASET_SUBDIR)
 PROCESSED_DATASET_PREFIX = join_s3_key("processed", DATASET_SUBDIR)
+Q1_MERGED_PREFIX = join_s3_key("processed", "question_1", "merged")
 LOG_PREFIX = join_s3_key("emr-logs")
 
 LOG_URI = f"s3://{S3_BUCKET}/{LOG_PREFIX}/"
 SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{SCRIPT_KEY}"
+MERGE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{MERGE_SCRIPT_KEY}"
+HOLIDAY_REFERENCE_S3_URI = f"s3://{S3_BUCKET}/{HOLIDAY_REFERENCE_KEY}"
 RAW_DATASET_PATH = f"s3://{S3_BUCKET}/{RAW_DATASET_PREFIX}/"
 PROCESSED_DATASET_PATH = f"s3://{S3_BUCKET}/{PROCESSED_DATASET_PREFIX}/"
+Q1_MERGED_PATH = f"s3://{S3_BUCKET}/{Q1_MERGED_PREFIX}/"
 
 emr_client = boto3.client("emr", region_name=REGION)
 glue_client = boto3.client("glue", region_name=REGION)
 s3_client = boto3.client("s3", region_name=REGION)
 
 
-def find_local_ingest_script() -> str:
+def find_local_scripts_asset(asset_name: str) -> str:
     dag_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        "/opt/airflow/scripts/ingest.py",
-        os.path.join(dag_dir, "..", "..", "scripts", "ingest.py"),
-        "/home/ec2-user/big-data-project/scripts/ingest.py",
+        os.path.join("/opt/airflow/scripts", asset_name),
+        os.path.join(dag_dir, "..", "..", "scripts", asset_name),
+        os.path.join("/home/ec2-user/big-data-project/scripts", asset_name),
     ]
-    local_script = next((path for path in candidates if os.path.exists(path)), None)
-    if local_script is None:
-        raise FileNotFoundError(f"ingest.py not found in any of: {candidates}")
-    return local_script
+    local_asset = next((path for path in candidates if os.path.exists(path)), None)
+    if local_asset is None:
+        raise FileNotFoundError(f"{asset_name} not found in any of: {candidates}")
+    return local_asset
+
+
+def find_local_ingest_script() -> str:
+    return find_local_scripts_asset("ingest.py")
+
+
+def upload_local_asset(asset_name: str, s3_key: str) -> None:
+    local_asset = find_local_scripts_asset(asset_name)
+    s3_client.upload_file(local_asset, S3_BUCKET, s3_key)
+    print(f"Uploaded {local_asset} to s3://{S3_BUCKET}/{s3_key}")
 
 
 def upload_ingest_script() -> None:
-    local_script = find_local_ingest_script()
-    s3_client.upload_file(local_script, S3_BUCKET, SCRIPT_KEY)
-    print(f"Uploaded {local_script} to {SCRIPT_S3_URI}")
+    upload_local_asset("ingest.py", SCRIPT_KEY)
+
+
+def upload_merge_script() -> None:
+    upload_local_asset("merge.py", MERGE_SCRIPT_KEY)
+
+
+def upload_holiday_reference() -> None:
+    upload_local_asset("holiday_reference.csv", HOLIDAY_REFERENCE_KEY)
 
 
 def create_emr_cluster() -> str:
@@ -119,9 +142,14 @@ def wait_for_cluster(cluster_id: str) -> bool:
         time.sleep(30)
 
 
-def submit_spark_step(cluster_id: str) -> str:
+def submit_spark_script_step(
+    cluster_id: str,
+    step_name: str,
+    script_s3_uri: str,
+    script_args: Sequence[str],
+) -> str:
     step = {
-        "Name": "Airline-Ingest-PySpark-Step",
+        "Name": step_name,
         "ActionOnFailure": "CONTINUE",
         "HadoopJarStep": {
             "Jar": "command-runner.jar",
@@ -129,9 +157,8 @@ def submit_spark_step(cluster_id: str) -> str:
                 "spark-submit",
                 "--deploy-mode",
                 "cluster",
-                SCRIPT_S3_URI,
-                RAW_DATASET_PATH,
-                PROCESSED_DATASET_PATH,
+                script_s3_uri,
+                *script_args,
             ],
         },
     }
@@ -140,6 +167,36 @@ def submit_spark_step(cluster_id: str) -> str:
     step_id = response["StepIds"][0]
     print(f"Submitted step {step_id} to cluster {cluster_id}")
     return step_id
+
+
+def submit_spark_step(cluster_id: str) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Airline-Ingest-PySpark-Step",
+        script_s3_uri=SCRIPT_S3_URI,
+        script_args=[RAW_DATASET_PATH, PROCESSED_DATASET_PATH],
+    )
+
+
+def submit_merge_spark_step(
+    cluster_id: str,
+    days_before: int = 7,
+    days_after: int = 7,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Airline-Holiday-Merge-PySpark-Step",
+        script_s3_uri=MERGE_SCRIPT_S3_URI,
+        script_args=[
+            PROCESSED_DATASET_PATH,
+            HOLIDAY_REFERENCE_S3_URI,
+            Q1_MERGED_PATH,
+            "--days-before",
+            str(days_before),
+            "--days-after",
+            str(days_after),
+        ],
+    )
 
 
 def wait_for_step(cluster_id: str, step_id: str) -> bool:
