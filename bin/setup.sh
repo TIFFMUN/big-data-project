@@ -224,8 +224,8 @@ SUBNET_ID=$(aws ec2 describe-subnets \
 echo ""
 info "Uploading PySpark script to S3..."
 
-aws s3 cp "$SCRIPTS_DIR/etl_job.py" "s3://${S3_BUCKET}/scripts/etl_job.py"
-ok "Uploaded etl_job.py → s3://${S3_BUCKET}/scripts/"
+aws s3 cp "$SCRIPTS_DIR/ingest.py" "s3://${S3_BUCKET}/scripts/ingest.py"
+ok "Uploaded ingest.py → s3://${S3_BUCKET}/scripts/"
 
 
 ###############################################################################

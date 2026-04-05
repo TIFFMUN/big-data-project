@@ -258,8 +258,8 @@ $airflowIp = terraform output -raw airflow_public_ip 2>$null
 Write-Host ""
 Info "Uploading PySpark script to S3..."
 
-aws s3 cp "$ScriptsDir\etl_job.py" "s3://$s3Bucket/scripts/etl_job.py"
-Ok "Uploaded etl_job.py -> s3://$s3Bucket/scripts/"
+aws s3 cp "$ScriptsDir\ingest.py" "s3://$s3Bucket/scripts/ingest.py"
+Ok "Uploaded ingest.py -> s3://$s3Bucket/scripts/"
 
 
 ###############################################################################
