@@ -39,7 +39,7 @@ with DAG(
             LIMIT 100
         """,
         database="bigdata_project_db",
-        output_location="s3://{{ var.value.s3_bucket | default('bigdata-i767935-1775365227') }}/athena-results/",
+        output_location="s3://bigdata-i767935-1775365227/athena-results/",
     )
 
     # Task runs independently
