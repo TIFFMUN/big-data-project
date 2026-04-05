@@ -26,19 +26,23 @@ DATASET_SUBDIR = os.getenv("DATASET_SUBDIR", "airline_data")
 
 SCRIPT_KEY = join_s3_key("scripts", "ingest.py")
 MERGE_SCRIPT_KEY = join_s3_key("scripts", "merge.py")
+AGGREGATE_SCRIPT_KEY = join_s3_key("scripts", "aggregate.py")
 HOLIDAY_REFERENCE_KEY = join_s3_key("raw", "reference", "holiday_reference.csv")
 RAW_DATASET_PREFIX = join_s3_key("raw", DATASET_SUBDIR)
 PROCESSED_DATASET_PREFIX = join_s3_key("processed", DATASET_SUBDIR)
 Q1_MERGED_PREFIX = join_s3_key("processed", "question_1", "merged")
+Q1_AGGREGATED_PREFIX = join_s3_key("processed", "question_1", "aggregated")
 LOG_PREFIX = join_s3_key("emr-logs")
 
 LOG_URI = f"s3://{S3_BUCKET}/{LOG_PREFIX}/"
 SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{SCRIPT_KEY}"
 MERGE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{MERGE_SCRIPT_KEY}"
+AGGREGATE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{AGGREGATE_SCRIPT_KEY}"
 HOLIDAY_REFERENCE_S3_URI = f"s3://{S3_BUCKET}/{HOLIDAY_REFERENCE_KEY}"
 RAW_DATASET_PATH = f"s3://{S3_BUCKET}/{RAW_DATASET_PREFIX}/"
 PROCESSED_DATASET_PATH = f"s3://{S3_BUCKET}/{PROCESSED_DATASET_PREFIX}/"
 Q1_MERGED_PATH = f"s3://{S3_BUCKET}/{Q1_MERGED_PREFIX}/"
+Q1_AGGREGATED_PATH = f"s3://{S3_BUCKET}/{Q1_AGGREGATED_PREFIX}/"
 
 emr_client = boto3.client("emr", region_name=REGION)
 glue_client = boto3.client("glue", region_name=REGION)
@@ -74,6 +78,10 @@ def upload_ingest_script() -> None:
 
 def upload_merge_script() -> None:
     upload_local_asset("merge.py", MERGE_SCRIPT_KEY)
+
+
+def upload_aggregate_script() -> None:
+    upload_local_asset("aggregate.py", AGGREGATE_SCRIPT_KEY)
 
 
 def upload_holiday_reference() -> None:
@@ -195,6 +203,23 @@ def submit_merge_spark_step(
             str(days_before),
             "--days-after",
             str(days_after),
+        ],
+    )
+
+
+def submit_aggregate_spark_step(
+    cluster_id: str,
+    delay_threshold: int = 15,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Airline-Holiday-Aggregate-PySpark-Step",
+        script_s3_uri=AGGREGATE_SCRIPT_S3_URI,
+        script_args=[
+            Q1_MERGED_PATH,
+            Q1_AGGREGATED_PATH,
+            "--delay-threshold",
+            str(delay_threshold),
         ],
     )
 

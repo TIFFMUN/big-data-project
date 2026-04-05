@@ -82,6 +82,14 @@ with DAG(
         poke_interval=30,
     )
 
+    t_run_aggregate_pipeline = TriggerDagRunOperator(
+        task_id="run_aggregate_pipeline",
+        trigger_dag_id="project_dag_aggregate",
+        conf=shared_cluster_conf,
+        wait_for_completion=True,
+        poke_interval=30,
+    )
+
     t_terminate_emr_cluster = PythonOperator(
         task_id="terminate_emr_cluster",
         python_callable=task_terminate_emr_cluster,
@@ -93,5 +101,6 @@ with DAG(
         >> t_wait_for_cluster_ready
         >> t_run_ingest_pipeline
         >> t_run_merge_pipeline
+        >> t_run_aggregate_pipeline
         >> t_terminate_emr_cluster
     )
