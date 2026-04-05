@@ -22,6 +22,8 @@ with DAG(
     tags=["big-data", "athena", "analysis"],
 ) as dag:
 
+    # Simple query to verify data is accessible
+    # TODO: Team member will add actual analytical queries here
     q1_holiday_impact = AthenaOperator(
         task_id="q1_holiday_impact",
         query="""
