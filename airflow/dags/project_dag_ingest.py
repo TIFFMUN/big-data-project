@@ -8,8 +8,6 @@ Flow:
 4. Submit the Spark ingest step to EMR.
 5. Wait for the step to complete.
 6. Terminate the EMR cluster when this DAG owns the cluster lifecycle.
-7. Trigger the Glue crawler on /processed/
-8. Wait for crawler completion.
 """
 
 from datetime import datetime, timedelta
@@ -18,17 +16,14 @@ import sys
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
 
 from emr_config import (
     REGION,
     RAW_DATASET_PREFIX,
     S3_BUCKET,
-    check_crawler_status,
     create_emr_cluster,
     submit_spark_step,
     terminate_emr_cluster,
-    trigger_glue_crawler,
     upload_ingest_script,
     wait_for_cluster,
     wait_for_step,
@@ -128,16 +123,6 @@ def task_terminate_emr_cluster(**context):
 
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     terminate_emr_cluster(cluster_id)
-
-
-def task_trigger_glue_crawler(**context):
-    trigger_glue_crawler()
-
-
-def task_check_crawler_status(**context):
-    return check_crawler_status()
-
-
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -150,8 +135,7 @@ with DAG(
     dag_id="project_dag_ingest",
     default_args=default_args,
     description=(
-        "Land raw Kaggle data when needed, run the PySpark ingest job, "
-        "and refresh the Glue catalog"
+        "Land raw Kaggle data when needed and run the PySpark ingest job"
     ),
     schedule_interval=None,
     start_date=datetime(2024, 1, 1),
@@ -193,19 +177,6 @@ with DAG(
         python_callable=task_terminate_emr_cluster,
     )
 
-    t_crawl = PythonOperator(
-        task_id="trigger_glue_crawler",
-        python_callable=task_trigger_glue_crawler,
-    )
-
-    t_crawl_wait = PythonSensor(
-        task_id="wait_for_crawler",
-        python_callable=task_check_crawler_status,
-        poke_interval=30,
-        timeout=600,
-        mode="poke",
-    )
-
     (
         t_land_raw
         >> t_upload
@@ -214,6 +185,4 @@ with DAG(
         >> t_submit
         >> t_wait_step
         >> t_terminate
-        >> t_crawl
-        >> t_crawl_wait
     )

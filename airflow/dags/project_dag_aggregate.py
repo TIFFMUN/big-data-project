@@ -7,22 +7,17 @@ Flow:
 3. Submit the Spark aggregate step to EMR.
 4. Wait for the step to complete.
 5. Terminate the EMR cluster when this DAG owns the cluster lifecycle.
-6. Trigger the Glue crawler on /processed/
-7. Wait for crawler completion.
 """
 
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
 
 from emr_config import (
-    check_crawler_status,
     create_emr_cluster,
     submit_aggregate_spark_step,
     terminate_emr_cluster,
-    trigger_glue_crawler,
     upload_aggregate_script,
     wait_for_cluster,
     wait_for_step,
@@ -139,16 +134,6 @@ def task_terminate_emr_cluster(**context):
 
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     terminate_emr_cluster(cluster_id)
-
-
-def task_trigger_glue_crawler(**context):
-    trigger_glue_crawler()
-
-
-def task_check_crawler_status(**context):
-    return check_crawler_status()
-
-
 default_args = {
     "owner": "airflow",
     "depends_on_past": False,
@@ -164,7 +149,7 @@ with DAG(
     schedule_interval=None,
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=["big-data", "aggregate", "holiday", "emr", "glue", "pyspark"],
+    tags=["big-data", "aggregate", "holiday", "emr", "pyspark"],
 ) as dag:
     t_upload_aggregate_script = PythonOperator(
         task_id="upload_aggregate_script",
@@ -196,19 +181,6 @@ with DAG(
         python_callable=task_terminate_emr_cluster,
     )
 
-    t_crawl = PythonOperator(
-        task_id="trigger_glue_crawler",
-        python_callable=task_trigger_glue_crawler,
-    )
-
-    t_crawl_wait = PythonSensor(
-        task_id="wait_for_crawler",
-        python_callable=task_check_crawler_status,
-        poke_interval=30,
-        timeout=600,
-        mode="poke",
-    )
-
     (
         t_upload_aggregate_script
         >> t_create
@@ -216,6 +188,4 @@ with DAG(
         >> t_submit
         >> t_wait_step
         >> t_terminate
-        >> t_crawl
-        >> t_crawl_wait
     )
