@@ -99,8 +99,13 @@ def merge_with_holidays(
     days_after: int,
 ) -> DataFrame:
     original_columns = flights_df.columns
+    internal_row_id_column = "_merge_row_id"
+    if internal_row_id_column in original_columns:
+        raise ValueError(
+            f"Curated input contains reserved internal column: {internal_row_id_column}"
+        )
     flights_with_row_id = flights_df.withColumn(
-        "_merge_row_id",
+        internal_row_id_column,
         F.monotonically_increasing_id(),
     )
 
