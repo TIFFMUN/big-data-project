@@ -248,10 +248,11 @@ def add_time_features(df: DataFrame) -> DataFrame:
 
 
 def is_reasonable_flight_date_expr():
-    return (
+    return F.coalesce(
         F.col("year").between(MIN_FLIGHT_YEAR, MAX_FLIGHT_YEAR)
         & F.col("month").between(1, 12)
-        & F.col("day_of_month").between(1, 31)
+        & F.col("day_of_month").between(1, 31),
+        F.lit(False),
     )
 
 
