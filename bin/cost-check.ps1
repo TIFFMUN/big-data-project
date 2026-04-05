@@ -65,6 +65,84 @@ try {
     Write-Host "  Not available yet" -ForegroundColor Yellow
 }
 
+# S3 Storage Costs
+Write-Host ""
+Write-Host "S3 Storage (data retained):" -ForegroundColor Cyan
+
+try {
+    # Get bucket name from terraform output
+    Push-Location (Join-Path $ProjectDir "terraform")
+    $bucketName = terraform output -raw s3_bucket_name 2>$null
+    Pop-Location
+
+    if ([string]::IsNullOrEmpty($bucketName)) {
+        # Fallback: find bucket by name pattern
+        $buckets = aws s3api list-buckets --query "Buckets[].Name" --output text 2>$null
+        $bucketName = $buckets -split "`t" | Where-Object { $_ -like "*bigdata*" } | Select-Object -First 1
+    }
+
+    if (-not [string]::IsNullOrEmpty($bucketName)) {
+        Write-Host "  Bucket: $bucketName"
+
+        # Try CloudWatch metrics first (more accurate)
+        $twoDaysAgo = (Get-Date).AddDays(-2).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")
+        $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")
+
+        $metricsJson = aws cloudwatch get-metric-statistics `
+            --namespace AWS/S3 `
+            --metric-name BucketSizeBytes `
+            --dimensions "Name=BucketName,Value=$bucketName" "Name=StorageType,Value=StandardStorage" `
+            --start-time $twoDaysAgo `
+            --end-time $now `
+            --period 86400 `
+            --statistics Average `
+            --output json 2>$null | ConvertFrom-Json
+
+        $sizeBytes = $null
+        if ($metricsJson.Datapoints.Count -gt 0) {
+            $sizeBytes = $metricsJson.Datapoints[-1].Average
+        }
+
+        if ($sizeBytes -and $sizeBytes -gt 0) {
+            $sizeGB = [math]::Round($sizeBytes / 1GB, 2)
+            $costMonth = [math]::Round($sizeGB * 0.023, 2)
+
+            Write-Host "  📦 Size: $sizeGB GB" -ForegroundColor White
+            Write-Host "  💰 Estimated cost: `$$costMonth/month (at `$0.023/GB)" -ForegroundColor Green
+        } else {
+            # Fallback: calculate from S3 API
+            Write-Host "  Calculating bucket size..."
+            $s3Objects = aws s3 ls "s3://$bucketName" --recursive --summarize 2>$null
+            $totalSizeLine = $s3Objects | Select-String "Total Size:"
+
+            if ($totalSizeLine) {
+                $totalSize = [long]($totalSizeLine -replace '.*Total Size:\s*', '')
+                $sizeGB = [math]::Round($totalSize / 1GB, 2)
+                $costMonth = [math]::Round($sizeGB * 0.023, 2)
+
+                Write-Host "  📦 Size: $sizeGB GB" -ForegroundColor White
+                Write-Host "  💰 Estimated cost: `$$costMonth/month (at `$0.023/GB)" -ForegroundColor Green
+            } else {
+                Write-Host "  Bucket is empty or data not available yet" -ForegroundColor Yellow
+            }
+        }
+
+        # Show object count by prefix
+        Write-Host ""
+        Write-Host "  Objects by prefix:"
+        foreach ($prefix in @("raw", "processed", "scripts", "athena-results", "emr-logs")) {
+            $count = (aws s3 ls "s3://$bucketName/$prefix/" --recursive 2>$null | Measure-Object).Count
+            if ($count -gt 0) {
+                Write-Host "    /$prefix/: $count files"
+            }
+        }
+    } else {
+        Write-Host "  No bucket found" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "  Unable to retrieve S3 storage info" -ForegroundColor Yellow
+}
+
 # Running EC2 instances
 Write-Host ""
 Write-Host "Running EC2 instances:" -ForegroundColor Cyan
