@@ -94,9 +94,9 @@ def build_pipeline():
         labelCol="flight_air_time_delay",
         featuresCol="features",
         predictionCol="prediction",
-        maxIter=60,
-        maxDepth=5,
-        maxBins=128,
+        maxIter=10,
+        maxDepth=4,
+        maxBins=64,
         stepSize=0.1,
         subsamplingRate=0.8,
         seed=42,
@@ -156,6 +156,8 @@ def main(argv: Sequence[str]) -> int:
 
         if modelling_df.rdd.isEmpty():
             raise ValueError("No rows available for Q2 model training after filtering.")
+        
+        modelling_df = modelling_df.cache()
 
         # split_cutoff = modelling_df.approxQuantile("scheduled_arr_ts_unix", [args.train_ratio], 0.01)[0]
         # train_df = modelling_df.filter(F.col("scheduled_arr_ts_unix") <= F.lit(split_cutoff))
@@ -173,6 +175,9 @@ def main(argv: Sequence[str]) -> int:
 
         if train_df.rdd.isEmpty() or test_df.rdd.isEmpty():
             raise ValueError("Unable to create non-empty train and test sets.")
+
+        train_df = train_df.cache()
+        test_df = test_df.cache()
 
         pipeline = build_pipeline()
         model = pipeline.fit(train_df)
