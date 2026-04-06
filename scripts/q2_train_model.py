@@ -134,7 +134,6 @@ def main(argv: Sequence[str]) -> int:
             "flight_id",
             "flight_date",
             "year",
-            "month",
             "model_version",
         ]
         missing_columns = [name for name in required_columns if name not in df.columns]
