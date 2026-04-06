@@ -5,9 +5,14 @@ Build the lite Q2 feature dataset for a smaller training slice.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import threading
+from datetime import datetime
 from typing import Sequence
+from urllib.parse import urlparse
 
+import boto3
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -20,8 +25,146 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--model-version", default="manual")
     parser.add_argument("--min-year", type=int, default=2004)
     parser.add_argument("--max-year", type=int, default=2008)
+    parser.add_argument("--progress-output-path", default=None)
     parser.add_argument("--app-name", default="BigDataProject-Q2BuildFeaturesLite")
     return parser.parse_args(argv)
+
+
+def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
+    parsed = urlparse(s3_uri)
+    if parsed.scheme != "s3":
+        raise ValueError(f"Expected s3:// URI, got {s3_uri}")
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def write_progress_payload(progress_output_path: str, payload: dict) -> None:
+    bucket, key = parse_s3_uri(progress_output_path)
+    boto3.client("s3").put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=json.dumps(payload, sort_keys=True).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def emit_progress(
+    progress_output_path: str | None,
+    phase: str,
+    percent_complete: float,
+    message: str,
+    extra: dict | None = None,
+    spark_status: dict | None = None,
+) -> None:
+    if not progress_output_path:
+        return
+
+    payload = {
+        "phase": phase,
+        "percent_complete": round(max(0.0, min(percent_complete, 100.0)), 1),
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    if extra:
+        payload.update(extra)
+    if spark_status:
+        payload["spark_status"] = spark_status
+
+    write_progress_payload(progress_output_path, payload)
+
+
+def collect_spark_status(spark: SparkSession) -> dict:
+    try:
+        tracker = spark.sparkContext.statusTracker()
+        stage_ids = list(tracker.getActiveStageIds())
+        completed_task_count = 0
+        total_task_count = 0
+        active_task_count = 0
+        failed_task_count = 0
+        for stage_id in stage_ids:
+            stage_info = tracker.getStageInfo(stage_id)
+            if stage_info is None:
+                continue
+            completed_task_count += int(getattr(stage_info, "numCompletedTasks", 0) or 0)
+            total_task_count += int(getattr(stage_info, "numTasks", 0) or 0)
+            active_task_count += int(getattr(stage_info, "numActiveTasks", 0) or 0)
+            failed_task_count += int(getattr(stage_info, "numFailedTasks", 0) or 0)
+        return {
+            "active_stage_count": len(stage_ids),
+            "completed_task_count": completed_task_count,
+            "total_task_count": total_task_count,
+            "active_task_count": active_task_count,
+            "failed_task_count": failed_task_count,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+class SparkProgressReporter:
+    def __init__(
+        self,
+        spark: SparkSession,
+        progress_output_path: str | None,
+        phase: str,
+        start_percent: float,
+        end_percent: float,
+        message: str,
+        extra: dict | None = None,
+        interval_seconds: int = 15,
+    ) -> None:
+        self.spark = spark
+        self.progress_output_path = progress_output_path
+        self.phase = phase
+        self.start_percent = start_percent
+        self.end_percent = end_percent
+        self.message = message
+        self.extra = extra or {}
+        self.interval_seconds = interval_seconds
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_percent = start_percent
+
+    def __enter__(self):
+        if not self.progress_output_path:
+            return self
+        emit_progress(
+            self.progress_output_path,
+            self.phase,
+            self.start_percent,
+            self.message,
+            extra=self.extra,
+        )
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not self.progress_output_path:
+            return False
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        return False
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            spark_status = collect_spark_status(self.spark)
+            total_task_count = spark_status.get("total_task_count", 0)
+            completed_task_count = spark_status.get("completed_task_count", 0)
+            if total_task_count:
+                candidate = self.start_percent + (
+                    float(completed_task_count) / float(total_task_count)
+                ) * (self.end_percent - self.start_percent)
+                self._last_percent = max(self._last_percent, candidate)
+
+            emit_progress(
+                self.progress_output_path,
+                self.phase,
+                self._last_percent,
+                self.message,
+                extra=self.extra,
+                spark_status=spark_status,
+            )
+            self._stop_event.wait(self.interval_seconds)
 
 
 def add_timestamp_columns(df):
@@ -244,8 +387,27 @@ def main(argv: Sequence[str]) -> int:
     spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
     try:
+        progress_context = {
+            "model_version": args.model_version,
+            "min_year": args.min_year,
+            "max_year": args.max_year,
+        }
+        emit_progress(
+            args.progress_output_path,
+            "starting",
+            1,
+            "Starting lite Q2 feature build.",
+            extra=progress_context,
+        )
         print("Reading curated dataset for lite Q2 feature build...")
         curated_df = spark.read.parquet(args.input_path)
+        emit_progress(
+            args.progress_output_path,
+            "read_input",
+            10,
+            "Loaded curated dataset for lite Q2 feature build.",
+            extra=progress_context,
+        )
         print(
             f"Filtering curated dataset to years {args.min_year}-{args.max_year} "
             f"for model_version={args.model_version}."
@@ -253,13 +415,43 @@ def main(argv: Sequence[str]) -> int:
         curated_slice_df = curated_df.filter(
             F.col("year").between(args.min_year, args.max_year)
         )
+        emit_progress(
+            args.progress_output_path,
+            "filter_years",
+            25,
+            "Filtered lite Q2 feature slice to the requested year range.",
+            extra=progress_context,
+        )
         feature_df = build_features(curated_slice_df, args.model_version)
+        emit_progress(
+            args.progress_output_path,
+            "build_features",
+            50,
+            "Prepared lite Q2 feature transformations and starting write.",
+            extra=progress_context,
+        )
 
         print(f"Writing lite Q2 feature dataset to {args.output_path}")
-        (
-            feature_df.write.mode("overwrite")
-            .partitionBy("model_version", "year", "month")
-            .parquet(args.output_path)
+        with SparkProgressReporter(
+            spark,
+            args.progress_output_path,
+            "write_features",
+            55,
+            95,
+            "Writing lite Q2 feature dataset.",
+            extra=progress_context,
+        ):
+            (
+                feature_df.write.mode("overwrite")
+                .partitionBy("model_version", "year", "month")
+                .parquet(args.output_path)
+            )
+        emit_progress(
+            args.progress_output_path,
+            "completed",
+            100,
+            "Completed lite Q2 feature build.",
+            extra=progress_context,
         )
     finally:
         spark.stop()

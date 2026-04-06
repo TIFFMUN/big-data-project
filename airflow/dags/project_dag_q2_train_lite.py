@@ -18,6 +18,7 @@ from emr_config_lite import (
     Q2_EVAL_LITE_PATH,
     Q2_FEATURES_LITE_PATH,
     Q2_MODEL_LITE_PATH,
+    build_lite_progress_path,
     create_emr_cluster,
     submit_q2_build_features_lite_step,
     submit_q2_train_model_lite_step,
@@ -76,6 +77,7 @@ def task_submit_feature_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     model_version = _training_version(context)
     feature_output_path = f"{Q2_FEATURES_LITE_PATH}model_version={model_version}/"
+    progress_output_path = build_lite_progress_path(model_version, "build_features")
 
     step_id = submit_q2_build_features_lite_step(
         cluster_id=cluster_id,
@@ -83,9 +85,11 @@ def task_submit_feature_step(**context):
         model_version=model_version,
         min_year=FEATURE_MIN_YEAR,
         max_year=FEATURE_MAX_YEAR,
+        progress_output_path=progress_output_path,
     )
     context["ti"].xcom_push(key="feature_step_id", value=step_id)
     context["ti"].xcom_push(key="feature_output_path", value=feature_output_path)
+    context["ti"].xcom_push(key="feature_progress_output_path", value=progress_output_path)
     context["ti"].xcom_push(key="model_version", value=model_version)
     return step_id
 
@@ -93,13 +97,18 @@ def task_submit_feature_step(**context):
 def task_wait_for_feature_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     step_id = context["ti"].xcom_pull(task_ids="submit_feature_step", key="feature_step_id")
-    return wait_for_step(cluster_id, step_id)
+    progress_output_path = context["ti"].xcom_pull(
+        task_ids="submit_feature_step",
+        key="feature_progress_output_path",
+    )
+    return wait_for_step(cluster_id, step_id, progress_output_path=progress_output_path)
 
 
 def task_submit_train_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     feature_output_path = context["ti"].xcom_pull(task_ids="submit_feature_step", key="feature_output_path")
     model_version = context["ti"].xcom_pull(task_ids="submit_feature_step", key="model_version")
+    progress_output_path = build_lite_progress_path(model_version, "train_model")
 
     model_path = f"{Q2_MODEL_LITE_PATH}model_version={model_version}/model"
     metrics_path = f"{Q2_MODEL_LITE_PATH}model_version={model_version}/metrics/metrics.json"
@@ -115,8 +124,10 @@ def task_submit_train_step(**context):
         train_end_year=TRAIN_END_YEAR,
         validation_year=VALIDATION_YEAR,
         test_year=TEST_YEAR,
+        progress_output_path=progress_output_path,
     )
     context["ti"].xcom_push(key="train_step_id", value=step_id)
+    context["ti"].xcom_push(key="train_progress_output_path", value=progress_output_path)
     context["ti"].xcom_push(key="model_path", value=model_path)
     return step_id
 
@@ -124,7 +135,11 @@ def task_submit_train_step(**context):
 def task_wait_for_train_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     step_id = context["ti"].xcom_pull(task_ids="submit_train_step", key="train_step_id")
-    return wait_for_step(cluster_id, step_id)
+    progress_output_path = context["ti"].xcom_pull(
+        task_ids="submit_train_step",
+        key="train_progress_output_path",
+    )
+    return wait_for_step(cluster_id, step_id, progress_output_path=progress_output_path)
 
 
 def task_set_active_model_version(**context):
