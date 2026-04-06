@@ -53,6 +53,8 @@ AGGREGATE_SCRIPT_KEY = join_s3_key("scripts", "aggregate.py")
 Q2_BUILD_FEATURES_KEY = join_s3_key("scripts", "q2_build_features.py")
 Q2_TRAIN_MODEL_KEY = join_s3_key("scripts", "q2_train_model.py")
 Q2_BATCH_INFERENCE_KEY = join_s3_key("scripts", "q2_batch_inference.py")
+Q2_BATCH_INFERENCE_XGB_KEY = join_s3_key("scripts", "q2_batch_inference_xgb.py")
+Q2_XGB_BOOTSTRAP_KEY = join_s3_key("scripts", "install_xgboost_emr.sh")
 
 HOLIDAY_REFERENCE_KEY = join_s3_key("raw", "reference", "holiday_reference.csv")
 RAW_DATASET_PREFIX = join_s3_key("raw", DATASET_SUBDIR)
@@ -65,6 +67,7 @@ Q2_FEATURES_PREFIX = join_s3_key("processed", "q2_features")
 Q2_EVAL_PREFIX = join_s3_key("processed", "q2_model_eval")
 Q2_PREDICTIONS_PREFIX = join_s3_key("processed", "q2_predictions")
 Q2_MODEL_PREFIX = join_s3_key("models", "q2_in_air_delay")
+Q2_XGB_MODEL_PREFIX = join_s3_key("models", "q2_in_air_delay_xgb")
 
 METRICS_PREFIX = join_s3_key("metrics", DATASET_SUBDIR)
 INGEST_METRICS_PREFIX = join_s3_key(METRICS_PREFIX, "ingest")
@@ -77,6 +80,8 @@ AGGREGATE_SCRIPT_S3_URI = f"s3://{S3_BUCKET}/{AGGREGATE_SCRIPT_KEY}"
 Q2_BUILD_FEATURES_S3_URI = f"s3://{S3_BUCKET}/{Q2_BUILD_FEATURES_KEY}"
 Q2_TRAIN_MODEL_S3_URI = f"s3://{S3_BUCKET}/{Q2_TRAIN_MODEL_KEY}"
 Q2_BATCH_INFERENCE_S3_URI = f"s3://{S3_BUCKET}/{Q2_BATCH_INFERENCE_KEY}"
+Q2_BATCH_INFERENCE_XGB_S3_URI = f"s3://{S3_BUCKET}/{Q2_BATCH_INFERENCE_XGB_KEY}"
+Q2_XGB_BOOTSTRAP_S3_URI = f"s3://{S3_BUCKET}/{Q2_XGB_BOOTSTRAP_KEY}"
 HOLIDAY_REFERENCE_S3_URI = f"s3://{S3_BUCKET}/{HOLIDAY_REFERENCE_KEY}"
 
 RAW_DATASET_PATH = f"s3://{S3_BUCKET}/{RAW_DATASET_PREFIX}/"
@@ -89,29 +94,46 @@ Q2_FEATURES_PATH = f"s3://{S3_BUCKET}/{Q2_FEATURES_PREFIX}/"
 Q2_EVAL_PATH = f"s3://{S3_BUCKET}/{Q2_EVAL_PREFIX}/"
 Q2_PREDICTIONS_PATH = f"s3://{S3_BUCKET}/{Q2_PREDICTIONS_PREFIX}/"
 Q2_MODEL_PATH = f"s3://{S3_BUCKET}/{Q2_MODEL_PREFIX}/"
+Q2_XGB_MODEL_PATH = f"s3://{S3_BUCKET}/{Q2_XGB_MODEL_PREFIX}/"
 
 emr_client = boto3.client("emr", region_name=REGION)
 glue_client = boto3.client("glue", region_name=REGION)
 s3_client = boto3.client("s3", region_name=REGION)
 
 
-def find_local_scripts_asset(asset_name: str) -> str:
+def find_local_repo_asset(*relative_parts: str) -> str:
     dag_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        os.path.join("/opt/airflow/scripts", asset_name),
-        os.path.join(dag_dir, "..", "..", "scripts", asset_name),
-        os.path.join("/home/ec2-user/big-data-project/scripts", asset_name),
+        os.path.join("/opt/airflow", *relative_parts),
+        os.path.join(dag_dir, "..", "..", *relative_parts),
+        os.path.join("/home/ec2-user/big-data-project", *relative_parts),
     ]
     local_asset = next((path for path in candidates if os.path.exists(path)), None)
     if local_asset is None:
-        raise FileNotFoundError(f"{asset_name} not found in any of: {candidates}")
+        raise FileNotFoundError(f"{os.path.join(*relative_parts)} not found in any of: {candidates}")
     return local_asset
+
+
+def find_local_scripts_asset(asset_name: str) -> str:
+    return find_local_repo_asset("scripts", asset_name)
+
+
+def find_local_model_asset(asset_name: str) -> str:
+    return find_local_repo_asset("model", asset_name)
 
 
 def upload_local_asset(asset_name: str, s3_key: str) -> None:
     local_asset = find_local_scripts_asset(asset_name)
     s3_client.upload_file(local_asset, S3_BUCKET, s3_key)
     print(f"Uploaded {local_asset} to s3://{S3_BUCKET}/{s3_key}")
+
+
+def upload_local_model_asset(asset_name: str, s3_key: str) -> str:
+    local_asset = find_local_model_asset(asset_name)
+    s3_client.upload_file(local_asset, S3_BUCKET, s3_key)
+    s3_uri = f"s3://{S3_BUCKET}/{s3_key}"
+    print(f"Uploaded {local_asset} to {s3_uri}")
+    return s3_uri
 
 
 def upload_ingest_script() -> None:
@@ -142,13 +164,57 @@ def upload_q2_batch_inference_script() -> None:
     upload_local_asset("q2_batch_inference.py", Q2_BATCH_INFERENCE_KEY)
 
 
+def upload_q2_batch_inference_xgb_script() -> None:
+    upload_local_asset("q2_batch_inference_xgb.py", Q2_BATCH_INFERENCE_XGB_KEY)
+
+
+def upload_q2_xgb_bootstrap_script() -> None:
+    upload_local_asset("install_xgboost_emr.sh", Q2_XGB_BOOTSTRAP_KEY)
+
+
 def upload_q2_scripts() -> None:
     upload_q2_build_features_script()
     upload_q2_train_model_script()
     upload_q2_batch_inference_script()
 
 
-def create_emr_cluster() -> str:
+def build_q2_xgb_model_artifact_key(
+    model_version: str,
+    asset_name: str = "model.tar-3.gz",
+) -> str:
+    safe_model_version = sanitize_s3_key_segment(model_version)
+    return join_s3_key(Q2_XGB_MODEL_PREFIX, f"model_version={safe_model_version}", asset_name)
+
+
+def build_q2_xgb_model_artifact_s3_uri(
+    model_version: str,
+    asset_name: str = "model.tar-3.gz",
+) -> str:
+    return f"s3://{S3_BUCKET}/{build_q2_xgb_model_artifact_key(model_version, asset_name)}"
+
+
+def upload_q2_xgb_model_artifact(
+    model_version: str,
+    asset_name: str = "model.tar-3.gz",
+) -> str:
+    return upload_local_model_asset(
+        asset_name,
+        build_q2_xgb_model_artifact_key(model_version, asset_name),
+    )
+
+
+def upload_q2_xgb_assets(model_version: str) -> str:
+    upload_q2_build_features_script()
+    upload_q2_batch_inference_xgb_script()
+    upload_q2_xgb_bootstrap_script()
+    return upload_q2_xgb_model_artifact(model_version)
+
+
+def create_emr_cluster(
+    cluster_name: str = "bigdata-project-emr-transient",
+    pipeline_tag: str = None,
+    bootstrap_action_s3_uris: Sequence[str] = (),
+) -> str:
     instances = {
         "InstanceGroups": [
             {
@@ -177,8 +243,27 @@ def create_emr_cluster() -> str:
         "TerminationProtected": False,
     }
 
+    tags = [
+        {"Key": "Project", "Value": "big-data-project"},
+        {"Key": "ManagedBy", "Value": "airflow"},
+    ]
+    if pipeline_tag:
+        tags.append({"Key": "Pipeline", "Value": pipeline_tag})
+
+    bootstrap_actions = []
+    for index, s3_uri in enumerate(bootstrap_action_s3_uris, start=1):
+        bootstrap_actions.append(
+            {
+                "Name": f"Bootstrap-{index}",
+                "ScriptBootstrapAction": {"Path": s3_uri},
+            }
+        )
+    run_job_flow_kwargs = {}
+    if bootstrap_actions:
+        run_job_flow_kwargs["BootstrapActions"] = bootstrap_actions
+
     response = emr_client.run_job_flow(
-        Name="bigdata-project-emr-transient",
+        Name=cluster_name,
         ReleaseLabel=EMR_RELEASE,
         Applications=[{"Name": "Spark"}],
         Instances=instances,
@@ -187,10 +272,8 @@ def create_emr_cluster() -> str:
         JobFlowRole=EMR_EC2_PROFILE,
         VisibleToAllUsers=True,
         AutoTerminationPolicy={"IdleTimeout": 3600},
-        Tags=[
-            {"Key": "Project", "Value": "big-data-project"},
-            {"Key": "ManagedBy", "Value": "airflow"},
-        ],
+        Tags=tags,
+        **run_job_flow_kwargs,
     )
 
     cluster_id = response["JobFlowId"]
@@ -215,19 +298,15 @@ def submit_spark_script_step(
     step_name: str,
     script_s3_uri: str,
     script_args: Sequence[str],
+    spark_submit_args: Sequence[str] = (),
 ) -> str:
+    submit_args = ["spark-submit", *spark_submit_args, "--deploy-mode", "cluster", script_s3_uri, *script_args]
     step = {
         "Name": step_name,
         "ActionOnFailure": "CONTINUE",
         "HadoopJarStep": {
             "Jar": "command-runner.jar",
-            "Args": [
-                "spark-submit",
-                "--deploy-mode",
-                "cluster",
-                script_s3_uri,
-                *script_args,
-            ],
+            "Args": submit_args,
         },
     }
 
@@ -352,6 +431,34 @@ def submit_q2_batch_inference_step(
             model_version,
             "--inference-batch-id",
             inference_batch_id,
+        ],
+    )
+
+
+def submit_q2_batch_inference_xgb_step(
+    cluster_id: str,
+    input_path: str,
+    model_path: str,
+    output_path: str,
+    model_version: str,
+    inference_batch_id: str,
+) -> str:
+    return submit_spark_script_step(
+        cluster_id=cluster_id,
+        step_name="Q2-Batch-Inference-XGBoost-PySpark-Step",
+        script_s3_uri=Q2_BATCH_INFERENCE_XGB_S3_URI,
+        script_args=[
+            input_path,
+            model_path,
+            output_path,
+            "--model-version",
+            model_version,
+            "--inference-batch-id",
+            inference_batch_id,
+        ],
+        spark_submit_args=[
+            "--files",
+            model_path,
         ],
     )
 

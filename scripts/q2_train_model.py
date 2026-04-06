@@ -8,9 +8,7 @@ import argparse
 import json
 import sys
 from typing import Sequence
-from urllib.parse import urlparse
 
-import boto3
 from pyspark.ml import Pipeline
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import OneHotEncoder, StringIndexer, VectorAssembler
@@ -61,11 +59,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
-    parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3":
-        raise ValueError(f"Expected s3:// URI, got {s3_uri}")
-    return parsed.netloc, parsed.path.lstrip("/")
+def write_text_to_uri(spark: SparkSession, output_path: str, text: str) -> None:
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(output_path)
+    output_stream = path.getFileSystem(hadoop_conf).create(path, True)
+    writer = jvm.java.io.OutputStreamWriter(output_stream, "UTF-8")
+    try:
+        writer.write(text)
+        writer.flush()
+    finally:
+        writer.close()
 
 
 def build_pipeline():
@@ -134,7 +138,6 @@ def main(argv: Sequence[str]) -> int:
             "flight_id",
             "flight_date",
             "year",
-            "month",
             "model_version",
         ]
         missing_columns = [name for name in required_columns if name not in df.columns]
@@ -214,13 +217,10 @@ def main(argv: Sequence[str]) -> int:
             .parquet(args.evaluation_output_path)
         )
 
-        s3_client = boto3.client("s3")
-        metrics_bucket, metrics_key = parse_s3_uri(args.metrics_path)
-        s3_client.put_object(
-            Bucket=metrics_bucket,
-            Key=metrics_key,
-            Body=json.dumps(metrics, indent=2).encode("utf-8"),
-            ContentType="application/json",
+        write_text_to_uri(
+            spark,
+            args.metrics_path,
+            json.dumps(metrics, indent=2),
         )
 
         print(json.dumps(metrics, indent=2))

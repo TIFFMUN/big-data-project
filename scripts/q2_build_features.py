@@ -142,6 +142,7 @@ def build_features(df, model_version: str):
         .withColumn("dest_prev_1h_avg_arr_delay", F.avg("arr_delay").over(dest_order_window))
         .withColumn("dest_prev_1h_delay_rate", F.avg("arr_delay_over_15_flag").over(dest_order_window))
         .withColumn("dest_prev_1h_positive_delay_rate", F.avg("arr_delay_positive_flag").over(dest_order_window))
+        .withColumn("dest_prev_1h_avg_distance", F.avg("distance").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_taxi_in", F.avg("taxi_in").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_dep_delay", F.avg("dep_delay").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_air_time_delay", F.avg("flight_air_time_delay").over(dest_order_window))
@@ -163,6 +164,7 @@ def build_features(df, model_version: str):
             "dest_prev_1h_avg_arr_delay": 0.0,
             "dest_prev_1h_delay_rate": 0.0,
             "dest_prev_1h_positive_delay_rate": 0.0,
+            "dest_prev_1h_avg_distance": 0.0,
             "dest_prev_1h_avg_taxi_in": 0.0,
             "dest_prev_1h_avg_dep_delay": 0.0,
             "dest_prev_1h_avg_air_time_delay": 0.0,
@@ -215,6 +217,7 @@ def build_features(df, model_version: str):
             "dest_prev_1h_avg_arr_delay",
             "dest_prev_1h_delay_rate",
             "dest_prev_1h_positive_delay_rate",
+            "dest_prev_1h_avg_distance",
             "dest_prev_1h_avg_taxi_in",
             "dest_prev_1h_avg_dep_delay",
             "dest_prev_1h_avg_air_time_delay",
