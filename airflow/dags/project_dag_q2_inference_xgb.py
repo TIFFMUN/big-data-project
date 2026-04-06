@@ -12,7 +12,12 @@ from airflow.models import Variable
 from airflow.operators.python import PythonOperator
 from airflow.utils.trigger_rule import TriggerRule
 
-from dag_utils import get_dag_run_conf, get_external_cluster_id, get_manage_cluster
+from dag_utils import (
+    get_dag_run_conf,
+    get_external_cluster_id,
+    get_manage_cluster,
+    parse_manage_cluster,
+)
 from emr_config import (
     Q2_FEATURES_PATH,
     Q2_PREDICTIONS_PATH,
@@ -29,6 +34,11 @@ from emr_config import (
 
 def _inference_batch_id(context) -> str:
     return context["ts_nodash"]
+
+
+def _latest_month_only(context) -> bool:
+    conf = get_dag_run_conf(context)
+    return parse_manage_cluster(conf.get("latest_month_only", True))
 
 
 def task_resolve_model_version(**context):
@@ -99,11 +109,17 @@ def task_submit_feature_step(**context):
     cluster_id = context["ti"].xcom_pull(task_ids="create_emr_cluster", key="cluster_id")
     inference_batch_id = _inference_batch_id(context)
     feature_output_path = f"{Q2_FEATURES_PATH}inference_batch_id={inference_batch_id}/"
+    latest_month_only = _latest_month_only(context)
+    if latest_month_only:
+        print("Configuring XGBoost inference to build features for only the latest available month.")
+    else:
+        print("Configuring XGBoost inference to build features for the full curated dataset.")
 
     step_id = submit_q2_build_features_step(
         cluster_id=cluster_id,
         output_path=feature_output_path,
         model_version=inference_batch_id,
+        latest_month_only=latest_month_only,
     )
     context["ti"].xcom_push(key="feature_step_id", value=step_id)
     context["ti"].xcom_push(key="feature_output_path", value=feature_output_path)

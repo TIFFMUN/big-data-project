@@ -374,17 +374,22 @@ def submit_q2_build_features_step(
     cluster_id: str,
     output_path: str,
     model_version: str,
+    latest_month_only: bool = False,
 ) -> str:
+    script_args = [
+        PROCESSED_DATASET_PATH,
+        output_path,
+        "--model-version",
+        model_version,
+    ]
+    if latest_month_only:
+        script_args.append("--latest-month-only")
+
     return submit_spark_script_step(
         cluster_id=cluster_id,
         step_name="Q2-Build-Features-PySpark-Step",
         script_s3_uri=Q2_BUILD_FEATURES_S3_URI,
-        script_args=[
-            PROCESSED_DATASET_PATH,
-            output_path,
-            "--model-version",
-            model_version,
-        ],
+        script_args=script_args,
     )
 
 

@@ -19,6 +19,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("input_path", help="Curated input parquet path")
     parser.add_argument("output_path", help="Output parquet path for Q2 features")
     parser.add_argument("--model-version", default="manual")
+    parser.add_argument(
+        "--latest-month-only",
+        action="store_true",
+        help="Limit the feature build to the latest available year-month in the curated dataset.",
+    )
     parser.add_argument("--app-name", default="BigDataProject-Q2BuildFeatures")
     return parser.parse_args(argv)
 
@@ -237,6 +242,22 @@ def build_features(df, model_version: str):
     )
 
 
+def filter_to_latest_month(df):
+    latest_flight_date = df.select(F.max("flight_date").alias("latest_flight_date")).collect()[0][
+        "latest_flight_date"
+    ]
+    if latest_flight_date is None:
+        raise ValueError("Curated dataset is empty; unable to determine the latest month.")
+
+    latest_year = int(latest_flight_date.year)
+    latest_month = int(latest_flight_date.month)
+    filtered_df = df.filter(
+        (F.col("year") == latest_year)
+        & (F.col("month") == latest_month)
+    )
+    return filtered_df, latest_year, latest_month
+
+
 def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     spark = SparkSession.builder.appName(args.app_name).getOrCreate()
@@ -244,6 +265,12 @@ def main(argv: Sequence[str]) -> int:
 
     try:
         curated_df = spark.read.parquet(args.input_path)
+        if args.latest_month_only:
+            curated_df, latest_year, latest_month = filter_to_latest_month(curated_df)
+            print(
+                "Limiting Q2 feature build to the latest available month: "
+                f"{latest_year}-{latest_month:02d}"
+            )
         feature_df = build_features(curated_df, args.model_version)
 
         (
