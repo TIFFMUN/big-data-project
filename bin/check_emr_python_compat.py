@@ -21,7 +21,9 @@ EMR_SPARK_SCRIPTS = [
     REPO_ROOT / "scripts" / "merge.py",
     REPO_ROOT / "scripts" / "q2_batch_inference.py",
     REPO_ROOT / "scripts" / "q2_build_features.py",
+    REPO_ROOT / "scripts" / "q2_build_features_lite.py",
     REPO_ROOT / "scripts" / "q2_train_model.py",
+    REPO_ROOT / "scripts" / "q2_train_model_lite.py",
 ]
 BUILTIN_GENERIC_NAMES = {"dict", "list", "set", "tuple"}
 FUTURE_ANNOTATIONS_IMPORT = "annotations"
