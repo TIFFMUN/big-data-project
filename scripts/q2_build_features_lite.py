@@ -15,6 +15,47 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
+CATEGORICAL_COLUMNS = ["unique_carrier", "origin", "dest"]
+
+NUMERIC_COLUMNS = [
+    "distance",
+    "crs_elapsed_time",
+    "dep_delay",
+    "taxi_out",
+    "scheduled_dep_hour",
+    "scheduled_arr_hour",
+    "day_of_week",
+    "month",
+    "is_weekend_int",
+    "dest_prev_1h_flight_count",
+    "dest_prev_1h_avg_arr_delay",
+    "dest_prev_1h_delay_rate",
+    "dest_prev_1h_positive_delay_rate",
+    "dest_prev_1h_avg_taxi_in",
+    "dest_prev_1h_avg_dep_delay",
+    "dest_prev_1h_avg_air_time_delay",
+    "dest_prev_3h_flight_count",
+    "dest_prev_3h_avg_arr_delay",
+    "dest_prev_3h_delay_rate",
+    "dest_prev_3h_avg_taxi_in",
+    "dest_prev_3h_avg_air_time_delay",
+    "dest_prev_6h_flight_count",
+    "dest_prev_6h_avg_arr_delay",
+    "dest_prev_6h_delay_rate",
+    "dest_prev_6h_avg_taxi_in",
+    "dest_same_day_prior_arrivals",
+]
+
+LITE_FEATURE_OUTPUT_COLUMNS = [
+    "flight_id",
+    "flight_date",
+    "year",
+    *CATEGORICAL_COLUMNS,
+    *NUMERIC_COLUMNS,
+    "flight_air_time_delay",
+    "model_version",
+]
+
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the lite Q2 feature dataset.")
@@ -177,23 +218,6 @@ def add_timestamp_columns(df):
         F.lit(1),
     ).otherwise(F.lit(0))
 
-    df = df.withColumn(
-        "scheduled_dep_ts",
-        F.to_timestamp(
-            F.concat_ws(
-                " ",
-                F.date_format(F.col("flight_date"), "yyyy-MM-dd"),
-                F.concat_ws(
-                    ":",
-                    F.substring(F.col("crs_dep_time_hhmm"), 1, 2),
-                    F.substring(F.col("crs_dep_time_hhmm"), 3, 2),
-                    F.lit("00"),
-                ),
-            ),
-            "yyyy-MM-dd HH:mm:ss",
-        ),
-    )
-
     df = df.withColumn("scheduled_arr_local_date", F.date_add(F.col("flight_date"), arr_day_offset))
 
     df = df.withColumn(
@@ -215,8 +239,6 @@ def add_timestamp_columns(df):
 
     return (
         df.withColumn("scheduled_arr_day_offset", arr_day_offset.cast("int"))
-        .withColumn("scheduled_dep_day_offset", F.lit(0).cast("int"))
-        .withColumn("scheduled_dep_ts_unix", F.unix_timestamp("scheduled_dep_ts"))
         .withColumn("scheduled_arr_ts_unix", F.unix_timestamp("scheduled_arr_ts"))
     )
 
@@ -241,7 +263,7 @@ def build_features(df, model_version: str):
     )
 
     filtered = add_timestamp_columns(filtered)
-    filtered = filtered.filter(F.col("scheduled_arr_ts").isNotNull()).filter(F.col("scheduled_dep_ts").isNotNull())
+    filtered = filtered.filter(F.col("scheduled_arr_ts").isNotNull())
 
     filtered = filtered.withColumn(
         "flight_air_time_delay",
@@ -287,7 +309,6 @@ def build_features(df, model_version: str):
         .withColumn("dest_prev_1h_avg_arr_delay", F.avg("arr_delay").over(dest_order_window))
         .withColumn("dest_prev_1h_delay_rate", F.avg("arr_delay_over_15_flag").over(dest_order_window))
         .withColumn("dest_prev_1h_positive_delay_rate", F.avg("arr_delay_positive_flag").over(dest_order_window))
-        .withColumn("dest_prev_1h_avg_distance", F.avg("distance").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_taxi_in", F.avg("taxi_in").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_dep_delay", F.avg("dep_delay").over(dest_order_window))
         .withColumn("dest_prev_1h_avg_air_time_delay", F.avg("flight_air_time_delay").over(dest_order_window))
@@ -309,7 +330,6 @@ def build_features(df, model_version: str):
             "dest_prev_1h_avg_arr_delay": 0.0,
             "dest_prev_1h_delay_rate": 0.0,
             "dest_prev_1h_positive_delay_rate": 0.0,
-            "dest_prev_1h_avg_distance": 0.0,
             "dest_prev_1h_avg_taxi_in": 0.0,
             "dest_prev_1h_avg_dep_delay": 0.0,
             "dest_prev_1h_avg_air_time_delay": 0.0,
@@ -329,56 +349,7 @@ def build_features(df, model_version: str):
     return (
         enriched.withColumn("is_weekend_int", F.when(F.col("is_weekend"), F.lit(1)).otherwise(F.lit(0)))
         .withColumn("model_version", F.lit(model_version))
-        .select(
-            "flight_id",
-            "flight_date",
-            "year",
-            "month",
-            "day_of_month",
-            "day_of_week",
-            "is_weekend_int",
-            "unique_carrier",
-            "flight_num",
-            "tail_num",
-            "origin",
-            "dest",
-            "route_key",
-            "distance",
-            "crs_elapsed_time",
-            "air_time",
-            "dep_delay",
-            "arr_delay",
-            "taxi_in",
-            "taxi_out",
-            "scheduled_dep_hour",
-            "scheduled_arr_hour",
-            "scheduled_dep_day_offset",
-            "scheduled_arr_day_offset",
-            "scheduled_dep_ts",
-            "scheduled_arr_ts",
-            "scheduled_dep_ts_unix",
-            "scheduled_arr_ts_unix",
-            "dest_prev_1h_flight_count",
-            "dest_prev_1h_avg_arr_delay",
-            "dest_prev_1h_delay_rate",
-            "dest_prev_1h_positive_delay_rate",
-            "dest_prev_1h_avg_distance",
-            "dest_prev_1h_avg_taxi_in",
-            "dest_prev_1h_avg_dep_delay",
-            "dest_prev_1h_avg_air_time_delay",
-            "dest_prev_3h_flight_count",
-            "dest_prev_3h_avg_arr_delay",
-            "dest_prev_3h_delay_rate",
-            "dest_prev_3h_avg_taxi_in",
-            "dest_prev_3h_avg_air_time_delay",
-            "dest_prev_6h_flight_count",
-            "dest_prev_6h_avg_arr_delay",
-            "dest_prev_6h_delay_rate",
-            "dest_prev_6h_avg_taxi_in",
-            "dest_same_day_prior_arrivals",
-            "flight_air_time_delay",
-            "model_version",
-        )
+        .select(*LITE_FEATURE_OUTPUT_COLUMNS)
     )
 
 

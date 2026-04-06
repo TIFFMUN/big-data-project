@@ -49,6 +49,14 @@ NUMERIC_COLUMNS = [
     "dest_same_day_prior_arrivals",
 ]
 
+REQUIRED_COLUMNS = CATEGORICAL_COLUMNS + NUMERIC_COLUMNS + [
+    "flight_air_time_delay",
+    "flight_id",
+    "flight_date",
+    "year",
+    "model_version",
+]
+
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the lite Q2 Spark ML model.")
@@ -327,15 +335,7 @@ def main(argv: Sequence[str]) -> int:
             "Loaded lite Q2 feature dataset.",
             extra=progress_context,
         )
-        required_columns = CATEGORICAL_COLUMNS + NUMERIC_COLUMNS + [
-            "flight_air_time_delay",
-            "scheduled_arr_ts_unix",
-            "flight_id",
-            "flight_date",
-            "year",
-            "model_version",
-        ]
-        missing_columns = [name for name in required_columns if name not in df.columns]
+        missing_columns = [name for name in REQUIRED_COLUMNS if name not in df.columns]
         if missing_columns:
             raise ValueError(f"Missing required columns for lite training: {missing_columns}")
 
@@ -358,11 +358,10 @@ def main(argv: Sequence[str]) -> int:
             extra=progress_context,
         )
         modelling_df = (
-            df.select(*required_columns)
-            .dropna(subset=["flight_air_time_delay", "scheduled_arr_ts_unix"] + CATEGORICAL_COLUMNS)
+            df.select(*REQUIRED_COLUMNS)
+            .dropna(subset=["flight_air_time_delay"] + CATEGORICAL_COLUMNS)
             .fillna(0, subset=NUMERIC_COLUMNS)
             .withColumn("flight_air_time_delay", F.col("flight_air_time_delay").cast("double"))
-            .withColumn("scheduled_arr_ts_unix", F.col("scheduled_arr_ts_unix").cast("double"))
             .filter(F.col("year").isin(*relevant_years))
             .cache()
         )
