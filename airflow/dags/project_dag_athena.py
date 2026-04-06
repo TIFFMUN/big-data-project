@@ -1,10 +1,3 @@
-"""
-Athena Analysis DAG for querying processed flight data.
-
-This DAG runs after the Glue Crawler completes and executes
-analytical queries on the cataloged data.
-"""
-
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -29,18 +22,81 @@ with DAG(
     tags=["big-data", "athena", "analysis"],
 ) as dag:
 
-    # Simple query to verify data is accessible
-    # TODO: Team member will add actual analytical queries here
-    query_processed_data = AthenaOperator(
-        task_id="query_processed_data",
+# Q1 - Query 1: Main persistence output
+    q1_holiday_impact = AthenaOperator(
+        task_id="q1_holiday_impact",
         query="""
-            SELECT *
-            FROM bigdata_project_db.processed
-            LIMIT 100
+        SELECT
+            holiday_name,
+            days_from_holiday,
+            SUM(flight_count) AS total_flights,
+            SUM(cancel_count) AS total_cancellations,
+            SUM(diverted_count) AS total_diversions,
+            AVG(avg_dep_delay) AS avg_dep_delay,
+            AVG(avg_arr_delay) AS avg_arr_delay,
+            AVG(cancel_rate) AS avg_cancel_rate,
+            AVG(dep_delay_uplift_vs_baseline) AS avg_dep_delay_uplift,
+            AVG(arr_delay_uplift_vs_baseline) AS avg_arr_delay_uplift,
+            AVG(cancel_rate_uplift_vs_baseline) AS avg_cancel_rate_uplift
+        FROM bigdata_project_db.aggregated
+        GROUP BY holiday_name, days_from_holiday
+        ORDER BY holiday_name, days_from_holiday
         """,
         database="bigdata_project_db",
-        output_location="s3://bigdata-i767935-1775365227/athena-results/",
+        output_location="s3://{{ var.value.s3_bucket | default('bigdata-i767935-1775365227') }}/athena-results/",
     )
 
-    # Task runs independently
-    query_processed_data
+    # Q1 - Query 2: Holiday period summary
+    q1_holiday_period_summary = AthenaOperator(
+        task_id="q1_holiday_period_summary",
+        query="""
+        SELECT
+            holiday_period,
+            SUM(flight_count) AS total_flights,
+            SUM(cancel_count) AS total_cancellations,
+            SUM(diverted_count) AS total_diversions,
+            AVG(avg_dep_delay) AS avg_dep_delay,
+            AVG(avg_arr_delay) AS avg_arr_delay,
+            AVG(cancel_rate) AS avg_cancel_rate,
+            AVG(dep_delay_uplift_vs_baseline) AS avg_dep_delay_uplift,
+            AVG(arr_delay_uplift_vs_baseline) AS avg_arr_delay_uplift,
+            AVG(cancel_rate_uplift_vs_baseline) AS avg_cancel_rate_uplift
+        FROM bigdata_project_db.aggregated
+        GROUP BY holiday_period
+        ORDER BY
+            CASE holiday_period
+                WHEN 'before' THEN 1
+                WHEN 'holiday' THEN 2
+                WHEN 'after' THEN 3
+                ELSE 4
+            END
+        """,
+        database="bigdata_project_db",
+        output_location="s3://{{ var.value.s3_bucket | default('bigdata-i767935-1775365227') }}/athena-results/",
+    )
+
+    # Q3 - Query 3: Airport network impact
+    q1_airport_network_impact = AthenaOperator(
+        task_id="q1_airport_network_impact",
+        query="""
+        SELECT
+            origin,
+            holiday_name,
+            AVG(avg_dep_delay) AS avg_dep_delay,
+            AVG(avg_arr_delay) AS avg_arr_delay,
+            AVG(cancel_rate) AS avg_cancel_rate,
+            AVG(dep_delay_uplift_vs_baseline) AS avg_dep_delay_uplift,
+            AVG(arr_delay_uplift_vs_baseline) AS avg_arr_delay_uplift,
+            SUM(flight_count) AS total_flights
+        FROM bigdata_project_db.aggregated
+        WHERE holiday_period IN ('before', 'holiday', 'after')
+        GROUP BY origin, holiday_name
+        HAVING SUM(flight_count) >= 100
+        ORDER BY avg_arr_delay DESC
+        LIMIT 20
+        """,
+        database="bigdata_project_db",
+        output_location="s3://{{ var.value.s3_bucket | default('bigdata-i767935-1775365227') }}/athena-results/",
+    )
+
+    q1_holiday_impact >> q1_holiday_period_summary >> q1_airport_network_impact
