@@ -66,6 +66,7 @@ jobs:
           try:
               import project_dag_main
               import project_dag_ingest
+              import project_dag_q2_train_lite
               import emr_config
               print('✓ All DAGs imported successfully')
           except Exception as e:
