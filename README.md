@@ -60,16 +60,28 @@ big-data-project/
 │   ├── docker-compose.yaml           #   Postgres · webserver · scheduler
 │   ├── requirements.txt              #   Python deps baked into the image
 │   ├── .env.example                  #   Template env vars (copy → .env)
-│   ├── dags/
+│   ├── dags/                         # Airflow DAGs and helpers
+│   │   ├── dag_utils.py              #   Reusable DAG helpers
 │   │   ├── emr_config.py             #   Shared config and helper functions
 │   │   ├── project_dag_ingest.py     #   DAG: raw landing → EMR ingest → Glue
-│   │   └── project_dag_main.py       #   DAG: main orchestration / triggers ingest
+│   │   ├── project_dag_main.py       #   DAG: main orchestration / triggers ingest
+│   │   ├── project_dag_aggregate.py  #   DAG: aggregation jobs
+│   │   ├── project_dag_athena.py     #   DAG: sample Athena queries / exports
+│   │   ├── project_dag_merge.py      #   DAG: merge/cleanup steps
+│   │   ├── project_dag_q2_train.py   #   DAG: Q2 model training
+│   │   └── project_dag_q2_inference.py # DAG: Q2 batch inference
 │   ├── logs/                         #   Container volume mount
 │   └── plugins/                      #   Container volume mount
 │
-├── scripts/
-│   ├── ingest.py                     # PySpark ingest (raw CSV → partitioned Parquet)
-│   └── load_kaggle_raw_to_s3.py      # Kaggle raw landing helper (Kaggle → S3 /raw/)
+├── scripts/                          # PySpark scripts and helpers
+│   ├── ingest.py                     #   PySpark ingest (raw CSV → partitioned Parquet)
+│   ├── load_kaggle_raw_to_s3.py      #   Kaggle raw landing helper (Kaggle → S3 /raw/)
+│   ├── aggregate.py                  #   Aggregation utilities / jobs
+│   ├── merge.py                      #   Merge/transform helper
+│   ├── q2_build_features.py          #   Feature engineering for Q2 models
+│   ├── q2_train_model.py             #   Q2 model training script
+│   ├── q2_batch_inference.py         #   Q2 batch inference runner
+│   └── holiday_reference.csv         #   Reference CSV used by ETL
 │
 ├── terraform/                        # Infrastructure-as-Code
 │   ├── main.tf                       #   Root module (provider + module wiring)
