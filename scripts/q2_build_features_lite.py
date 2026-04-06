@@ -10,9 +10,7 @@ import sys
 import threading
 from datetime import datetime
 from typing import Sequence
-from urllib.parse import urlparse
 
-import boto3
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -30,24 +28,21 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
-    parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3":
-        raise ValueError(f"Expected s3:// URI, got {s3_uri}")
-    return parsed.netloc, parsed.path.lstrip("/")
-
-
-def write_progress_payload(progress_output_path: str, payload: dict) -> None:
-    bucket, key = parse_s3_uri(progress_output_path)
-    boto3.client("s3").put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=json.dumps(payload, sort_keys=True).encode("utf-8"),
-        ContentType="application/json",
-    )
+def write_text_to_uri(spark: SparkSession, output_path: str, text: str) -> None:
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(output_path)
+    output_stream = path.getFileSystem(hadoop_conf).create(path, True)
+    writer = jvm.java.io.OutputStreamWriter(output_stream, "UTF-8")
+    try:
+        writer.write(text)
+        writer.flush()
+    finally:
+        writer.close()
 
 
 def emit_progress(
+    spark: SparkSession,
     progress_output_path: str | None,
     phase: str,
     percent_complete: float,
@@ -69,7 +64,11 @@ def emit_progress(
     if spark_status:
         payload["spark_status"] = spark_status
 
-    write_progress_payload(progress_output_path, payload)
+    write_text_to_uri(
+        spark,
+        progress_output_path,
+        json.dumps(payload, sort_keys=True),
+    )
 
 
 def collect_spark_status(spark: SparkSession) -> dict:
@@ -127,6 +126,7 @@ class SparkProgressReporter:
         if not self.progress_output_path:
             return self
         emit_progress(
+            self.spark,
             self.progress_output_path,
             self.phase,
             self.start_percent,
@@ -157,6 +157,7 @@ class SparkProgressReporter:
                 self._last_percent = max(self._last_percent, candidate)
 
             emit_progress(
+                self.spark,
                 self.progress_output_path,
                 self.phase,
                 self._last_percent,
@@ -393,6 +394,7 @@ def main(argv: Sequence[str]) -> int:
             "max_year": args.max_year,
         }
         emit_progress(
+            spark,
             args.progress_output_path,
             "starting",
             1,
@@ -402,6 +404,7 @@ def main(argv: Sequence[str]) -> int:
         print("Reading curated dataset for lite Q2 feature build...")
         curated_df = spark.read.parquet(args.input_path)
         emit_progress(
+            spark,
             args.progress_output_path,
             "read_input",
             10,
@@ -416,6 +419,7 @@ def main(argv: Sequence[str]) -> int:
             F.col("year").between(args.min_year, args.max_year)
         )
         emit_progress(
+            spark,
             args.progress_output_path,
             "filter_years",
             25,
@@ -424,6 +428,7 @@ def main(argv: Sequence[str]) -> int:
         )
         feature_df = build_features(curated_slice_df, args.model_version)
         emit_progress(
+            spark,
             args.progress_output_path,
             "build_features",
             50,
@@ -447,6 +452,7 @@ def main(argv: Sequence[str]) -> int:
                 .parquet(args.output_path)
             )
         emit_progress(
+            spark,
             args.progress_output_path,
             "completed",
             100,

@@ -10,9 +10,7 @@ import sys
 import threading
 from datetime import datetime
 from typing import Sequence
-from urllib.parse import urlparse
 
-import boto3
 from pyspark.ml import Pipeline
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import OneHotEncoder, StringIndexer, VectorAssembler
@@ -67,24 +65,21 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def parse_s3_uri(s3_uri: str) -> tuple[str, str]:
-    parsed = urlparse(s3_uri)
-    if parsed.scheme != "s3":
-        raise ValueError(f"Expected s3:// URI, got {s3_uri}")
-    return parsed.netloc, parsed.path.lstrip("/")
-
-
-def write_progress_payload(progress_output_path: str, payload: dict) -> None:
-    bucket, key = parse_s3_uri(progress_output_path)
-    boto3.client("s3").put_object(
-        Bucket=bucket,
-        Key=key,
-        Body=json.dumps(payload, sort_keys=True).encode("utf-8"),
-        ContentType="application/json",
-    )
+def write_text_to_uri(spark: SparkSession, output_path: str, text: str) -> None:
+    jvm = spark.sparkContext._jvm
+    hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(output_path)
+    output_stream = path.getFileSystem(hadoop_conf).create(path, True)
+    writer = jvm.java.io.OutputStreamWriter(output_stream, "UTF-8")
+    try:
+        writer.write(text)
+        writer.flush()
+    finally:
+        writer.close()
 
 
 def emit_progress(
+    spark: SparkSession,
     progress_output_path: str | None,
     phase: str,
     percent_complete: float,
@@ -106,7 +101,11 @@ def emit_progress(
     if spark_status:
         payload["spark_status"] = spark_status
 
-    write_progress_payload(progress_output_path, payload)
+    write_text_to_uri(
+        spark,
+        progress_output_path,
+        json.dumps(payload, sort_keys=True),
+    )
 
 
 def collect_spark_status(spark: SparkSession) -> dict:
@@ -164,6 +163,7 @@ class SparkProgressReporter:
         if not self.progress_output_path:
             return self
         emit_progress(
+            self.spark,
             self.progress_output_path,
             self.phase,
             self.start_percent,
@@ -194,6 +194,7 @@ class SparkProgressReporter:
                 self._last_percent = max(self._last_percent, candidate)
 
             emit_progress(
+                self.spark,
                 self.progress_output_path,
                 self.phase,
                 self._last_percent,
@@ -309,6 +310,7 @@ def main(argv: Sequence[str]) -> int:
             "test_year": args.test_year,
         }
         emit_progress(
+            spark,
             args.progress_output_path,
             "starting",
             1,
@@ -318,6 +320,7 @@ def main(argv: Sequence[str]) -> int:
         print("Reading lite Q2 feature dataset...")
         df = spark.read.parquet(args.input_path)
         emit_progress(
+            spark,
             args.progress_output_path,
             "read_input",
             8,
@@ -347,6 +350,7 @@ def main(argv: Sequence[str]) -> int:
             f"validation={args.validation_year}, test={args.test_year}."
         )
         emit_progress(
+            spark,
             args.progress_output_path,
             "prepare_dataset",
             15,
@@ -369,6 +373,7 @@ def main(argv: Sequence[str]) -> int:
         print(f"Prepared lite modelling dataset with {total_rows} rows.")
         progress_context["total_rows"] = total_rows
         emit_progress(
+            spark,
             args.progress_output_path,
             "dataset_ready",
             25,
@@ -403,6 +408,7 @@ def main(argv: Sequence[str]) -> int:
             }
         )
         emit_progress(
+            spark,
             args.progress_output_path,
             "split_ready",
             35,
@@ -431,6 +437,7 @@ def main(argv: Sequence[str]) -> int:
         print("Scoring validation split...")
         validation_predictions = model.transform(validation_df)
         emit_progress(
+            spark,
             args.progress_output_path,
             "validation_predictions_ready",
             76,
@@ -440,6 +447,7 @@ def main(argv: Sequence[str]) -> int:
         print("Scoring test split...")
         test_predictions = model.transform(test_df)
         emit_progress(
+            spark,
             args.progress_output_path,
             "test_predictions_ready",
             82,
@@ -519,23 +527,22 @@ def main(argv: Sequence[str]) -> int:
                 .parquet(args.evaluation_output_path)
             )
 
-        s3_client = boto3.client("s3")
-        metrics_bucket, metrics_key = parse_s3_uri(args.metrics_path)
         emit_progress(
+            spark,
             args.progress_output_path,
             "upload_metrics",
             99,
             "Uploading lite training metrics.",
             extra=progress_context,
         )
-        s3_client.put_object(
-            Bucket=metrics_bucket,
-            Key=metrics_key,
-            Body=json.dumps(metrics, indent=2).encode("utf-8"),
-            ContentType="application/json",
+        write_text_to_uri(
+            spark,
+            args.metrics_path,
+            json.dumps(metrics, indent=2),
         )
 
         emit_progress(
+            spark,
             args.progress_output_path,
             "completed",
             100,
