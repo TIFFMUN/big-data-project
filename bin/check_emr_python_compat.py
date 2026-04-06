@@ -20,6 +20,7 @@ EMR_SPARK_SCRIPTS = [
     REPO_ROOT / "scripts" / "ingest.py",
     REPO_ROOT / "scripts" / "merge.py",
     REPO_ROOT / "scripts" / "q2_batch_inference.py",
+    REPO_ROOT / "scripts" / "q2_batch_inference_xgb.py",
     REPO_ROOT / "scripts" / "q2_build_features.py",
     REPO_ROOT / "scripts" / "q2_build_features_lite.py",
     REPO_ROOT / "scripts" / "q2_train_model.py",
