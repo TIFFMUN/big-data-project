@@ -98,3 +98,5 @@ with DAG(
         database="bigdata_project_db",
         output_location="s3://{{ var.value.s3_bucket | default('bigdata-i767935-1775365227') }}/athena-results/",
     )
+
+    q1_holiday_impact >> q1_holiday_period_summary >> q1_airport_network_impact
